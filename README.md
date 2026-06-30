@@ -10,11 +10,13 @@
 
 ### 1. 装 PyTorch（如果没装）
 
+不需要全局安装 CUDA toolkit，只需 NVIDIA 驱动 + 下面这条命令：
+
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu126
 ```
 
-验证：
+验证 GPU 可用：
 
 ```bash
 python -c "import torch; print(torch.cuda.is_available())"
