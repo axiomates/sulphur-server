@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local models and generated outputs
+*.gguf
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+LTX-2.3-Diffusers/
+models/
+outputs/
+*.mp4
+
+# Hugging Face / caches
+.cache/
+huggingface/
+
+# Logs and local env
+*.log
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
