@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sulphur-2 Video Server</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f1117; color: #e1e4e8; min-height: 100vh;
+  }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 24px; background: #161b22; border-bottom: 1px solid #30363d;
+  }
+  .topbar h1 { font-size: 18px; font-weight: 600; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .dot.green { background: #3fb950; }
+  .dot.red { background: #f85149; }
+  .dot.yellow { background: #d2991d; }
+
+  .container { display: grid; grid-template-columns: 380px 1fr; gap: 24px; padding: 24px; max-width: 1400px; margin: 0 auto; }
+
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px;
+  }
+  .card h2 { font-size: 15px; font-weight: 600; margin-bottom: 16px; padding-bottom: 10px; border-bottom: 1px solid #21262d; }
+
+  .form-group { margin-bottom: 14px; }
+  .form-group label { display: block; font-size: 12px; color: #8b949e; margin-bottom: 4px; }
+  .form-group input, .form-group textarea, .form-group select {
+    width: 100%; padding: 8px 12px; background: #0d1117; border: 1px solid #30363d;
+    border-radius: 6px; color: #e1e4e8; font-size: 13px; outline: none;
+  }
+  .form-group input:focus, .form-group textarea:focus {
+    border-color: #58a6ff; box-shadow: 0 0 0 2px rgba(88,166,255,0.15);
+  }
+  .form-group textarea { min-height: 60px; resize: vertical; }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+  .btn {
+    width: 100%; padding: 10px 16px; border: none; border-radius: 6px;
+    font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn-primary { background: #238636; color: #fff; }
+  .btn-primary:disabled { background: #30363d; color: #484f58; cursor: not-allowed; }
+  .btn-danger { background: #da3633; color: #fff; font-size: 12px; padding: 4px 10px; width: auto; }
+  .btn-success { background: #238636; color: #fff; font-size: 12px; padding: 4px 10px; width: auto; }
+
+  .task-list { display: flex; flex-direction: column; gap: 10px; }
+  .task-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px; background: #0d1117; border: 1px solid #21262d;
+    border-radius: 6px; font-size: 13px;
+  }
+  .task-info { flex: 1; min-width: 0; }
+  .task-prompt { color: #e1e4e8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .task-meta { color: #8b949e; font-size: 11px; margin-top: 2px; }
+  .task-actions { display: flex; gap: 6px; margin-left: 12px; flex-shrink: 0; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+  }
+  .badge-queued { background: #1b3a5c; color: #58a6ff; }
+  .badge-processing { background: #2e2a0b; color: #d2991d; }
+  .badge-done { background: #16361e; color: #3fb950; }
+  .badge-failed { background: #3b1417; color: #f85149; }
+  .badge-cancelled { background: #21262d; color: #8b949e; }
+
+  .empty { text-align: center; color: #484f58; padding: 40px 0; font-size: 14px; }
+
+  .progress-bar {
+    height: 3px; background: #21262d; border-radius: 2px; margin-top: 8px; overflow: hidden;
+  }
+  .progress-fill { height: 100%; background: #d2991d; transition: width 0.3s; border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Sulphur-2 Video Server</h1>
+  <div class="status">
+    <span class="dot" id="health-dot"></span>
+    <span id="health-text">Checking...</span>
+  </div>
+</div>
+
+<div class="container">
+  <!-- Left: Generation Form -->
+  <div class="card">
+    <h2>Generate Video</h2>
+    <form id="gen-form">
+      <div class="form-group">
+        <label>Prompt (English)</label>
+        <textarea id="prompt" placeholder="A cat walking on a sunny European street, cinematic lighting"></textarea>
+      </div>
+      <div class="form-group">
+        <label>Negative Prompt</label>
+        <input id="neg-prompt" placeholder="worst quality, blurry, jittery, distorted">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Width</label>
+          <input id="width" type="number" value="768" step="32">
+        </div>
+        <div class="form-group">
+          <label>Height</label>
+          <input id="height" type="number" value="512" step="32">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Frames</label>
+          <input id="frames" type="number" value="121" step="8">
+        </div>
+        <div class="form-group">
+          <label>Steps</label>
+          <input id="steps" type="number" value="30" min="1" max="100">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Guidance Scale</label>
+          <input id="guidance" type="number" value="3.0" min="1" max="20" step="0.5">
+        </div>
+        <div class="form-group">
+          <label>Seed (-1 for random)</label>
+          <input id="seed" type="number" value="-1">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>FPS</label>
+          <input id="fps" type="number" value="24" min="1" max="60">
+        </div>
+        <div class="form-group" style="display:flex;align-items:flex-end">
+          <button type="submit" class="btn btn-primary" id="submit-btn">Generate</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <!-- Right: Task List -->
+  <div>
+    <div class="card" style="margin-bottom:24px">
+      <h2>Queue &amp; Tasks</h2>
+      <div class="task-list" id="task-list">
+        <div class="empty">No tasks yet</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+
+async function checkHealth() {
+  try {
+    const r = await fetch(`${API}/health`);
+    const d = await r.json();
+    const dot = document.getElementById('health-dot');
+    const text = document.getElementById('health-text');
+    if (d.status === 'ok' && d.model_loaded) {
+      dot.className = 'dot green';
+      text.textContent = `GPU Ready | Queue: ${d.queue_size}/${d.queue_max}`;
+    } else if (d.status === 'ok') {
+      dot.className = 'dot yellow';
+      text.textContent = 'Model loading...';
+    } else {
+      dot.className = 'dot red';
+      text.textContent = 'Down';
+    }
+  } catch(e) {
+    document.getElementById('health-dot').className = 'dot red';
+    document.getElementById('health-text').textContent = 'Cannot reach server';
+  }
+}
+
+const taskIds = new Set();
+
+function renderTasks(activeTasks) {
+  const container = document.getElementById('task-list');
+  if (activeTasks.length === 0) {
+    container.innerHTML = '<div class="empty">No tasks yet</div>';
+
+    return;
+  }
+  container.innerHTML = activeTasks.map(t => {
+    const shortId = t.id.slice(0, 8);
+    const prompt = t.params?.prompt || '';
+    const status = t.status;
+    const badgeClass = `badge-${status}`;
+    let actions = '';
+    if (status === 'queued') {
+      actions = `<button class="btn btn-danger" onclick="cancelTask('${t.id}')">Cancel</button>`;
+    } else if (status === 'done') {
+      actions = `<button class="btn btn-success" onclick="downloadTask('${t.id}')">Download</button>`;
+    }
+    const eta = status === 'processing' ? '<div class="progress-bar"><div class="progress-fill" style="width:60%"></div></div>' : '';
+    return `
+      <div class="task-item">
+        <div class="task-info">
+          <div class="task-prompt">${prompt || '(no prompt)'}</div>
+          <div class="task-meta">
+            <span class="badge ${badgeClass}">${status}</span>
+            #${shortId}
+            ${t.queue_position != null ? ` | queue pos: ${t.queue_position}` : ''}
+          </div>
+          ${eta}
+        </div>
+        <div class="task-actions">${actions}</div>
+      </div>`;
+  }).join('');
+}
+
+async function refreshTasks() {
+  const promises = [...taskIds].map(id =>
+    fetch(`${API}/v1/video/status/${id}`).then(r => r.json()).catch(() => null)
+  );
+  const results = await Promise.all(promises);
+  const active = results.filter(r => r).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  renderTasks(active);
+}
+
+document.getElementById('gen-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Submitting...';
+
+  const body = {
+    prompt: document.getElementById('prompt').value.trim(),
+    negative_prompt: document.getElementById('neg-prompt').value.trim() || undefined,
+    width: parseInt(document.getElementById('width').value),
+    height: parseInt(document.getElementById('height').value),
+    num_frames: parseInt(document.getElementById('frames').value),
+    num_inference_steps: parseInt(document.getElementById('steps').value),
+    guidance_scale: parseFloat(document.getElementById('guidance').value),
+    seed: parseInt(document.getElementById('seed').value),
+    fps: parseInt(document.getElementById('fps').value),
+  };
+  if (!body.prompt) { alert('Prompt required'); btn.disabled = false; btn.textContent = 'Generate'; return; }
+
+  try {
+    const r = await fetch(`${API}/v1/video/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (r.ok) {
+      taskIds.add(d.task_id);
+      refreshTasks();
+    } else {
+      alert(`Error ${r.status}: ${d.detail || 'Unknown'}`);
+    }
+  } catch(err) {
+    alert('Request failed: ' + err.message);
+  }
+  btn.disabled = false;
+  btn.textContent = 'Generate';
+});
+
+async function cancelTask(id) {
+  const r = await fetch(`${API}/v1/video/cancel/${id}`, { method: 'POST' });
+  if (!r.ok) { const d = await r.json(); alert(d.detail || 'Cancel failed'); }
+  refreshTasks();
+}
+
+function downloadTask(id) {
+  window.open(`${API}/v1/video/result/${id}`, '_blank');
+}
+
+// Init
+checkHealth();
+refreshTasks();
+setInterval(checkHealth, 5000);
+setInterval(refreshTasks, 2000);
+</script>
+</body>
+</html>
