@@ -56,21 +56,11 @@ python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_M.gguf
 
 看到 `Server ready` 就成功了。
 
-### 6. 测试生成
+### 6. 打开 Web UI
 
-```bash
-curl -X POST http://localhost:8080/v1/video/generate -H "Content-Type: application/json" -d "{\"prompt\": \"A cat walking on a sunny street\", \"num_frames\": 121, \"seed\": 42}"
-```
+浏览器访问 `http://localhost:8080/`，可以用表单发请求、看队列、取消任务、下载视频。
 
-返回 `{"task_id": "xxx", "status": "queued"}`。
-
-```bash
-# 查状态（出来 done 才能下载）
-curl http://localhost:8080/v1/video/status/xxx
-
-# 下载视频
-curl http://localhost:8080/v1/video/result/xxx -o output.mp4
-```
+> 不要直接双击 `static/index.html`，那样走 `file://` 协议发不了请求。
 
 ## 资源
 

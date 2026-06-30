@@ -29,7 +29,6 @@ pipe = None
 task_queue: "asyncio.Queue[Task]" = None
 tasks: dict[str, "Task"] = {}          # task_id -> Task
 tasks_lock = threading.Lock()
-QUEUE_MAX_SIZE = 16
 
 
 class TaskStatus(str, Enum):
@@ -302,6 +301,27 @@ async def queue_worker(worker_id: int):
         task_queue.task_done()
 
 
+async def cleanup_expired_tasks():
+    """定期清理已完成/失败/取消的过期任务，防止内存无限增长"""
+    TTL = 600  # 10 分钟后从内存中清除
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        removed = 0
+        with tasks_lock:
+            expired = [
+                tid for tid, t in tasks.items()
+                if t.status in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.CANCELLED)
+                and t.finished_at
+                and (now - t.finished_at > TTL)
+            ]
+            for tid in expired:
+                del tasks[tid]
+                removed += 1
+        if removed:
+            logger.info("Cleaned up %d expired task(s)", removed)
+
+
 # ---- FastAPI 生命周期 ----
 
 @asynccontextmanager
@@ -320,6 +340,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(queue_worker(i))
         for i in range(app.state.concurrency)
     ]
+    cleanup_task = asyncio.create_task(cleanup_expired_tasks())
     app.state.workers = workers
 
     app.state.start_time = time.time()
@@ -331,6 +352,7 @@ async def lifespan(app: FastAPI):
 
     # shutdown
     logger.info("Shutting down...")
+    cleanup_task.cancel()
     for w in workers:
         w.cancel()
     del pipe

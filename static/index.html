@@ -74,7 +74,15 @@
   .progress-bar {
     height: 3px; background: #21262d; border-radius: 2px; margin-top: 8px; overflow: hidden;
   }
-  .progress-fill { height: 100%; background: #d2991d; transition: width 0.3s; border-radius: 2px; }
+  .progress-fill { height: 100%; background: #d2991d; border-radius: 2px; }
+  .progress-fill.anim {
+    width: 30% !important;
+    animation: progress-slide 1.5s ease-in-out infinite;
+  }
+  @keyframes progress-slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(400%); }
+  }
 </style>
 </head>
 <body>
@@ -179,36 +187,70 @@ async function checkHealth() {
 }
 
 const taskIds = new Set();
+const TASK_MAX = 50;
+const TASK_TTL_MS = 300_000; // 完成/失败/取消的任务 5 分钟后从列表清除
 
 function renderTasks(activeTasks) {
   const container = document.getElementById('task-list');
   if (activeTasks.length === 0) {
     container.innerHTML = '<div class="empty">No tasks yet</div>';
-
     return;
   }
+  const now = Date.now() / 1000;
   container.innerHTML = activeTasks.map(t => {
     const shortId = t.id.slice(0, 8);
-    const prompt = t.params?.prompt || '';
     const status = t.status;
     const badgeClass = `badge-${status}`;
+
+    // 生成时间
+    const created = new Date((t.created_at || 0) * 1000);
+    const timeStr = created.toLocaleTimeString();
+
+    // 尺寸信息
+    const res = t.params ? `${t.params.width || '?'}×${t.params.height || '?'}` : '';
+
+    let icon = '';
+    if (status === 'queued') icon = '⏳';
+    else if (status === 'processing') icon = '🔄';
+    else if (status === 'done') icon = '✅';
+    else if (status === 'failed') icon = '❌';
+    else if (status === 'cancelled') icon = '🚫';
+
     let actions = '';
     if (status === 'queued') {
-      actions = `<button class="btn btn-danger" onclick="cancelTask('${t.id}')">Cancel</button>`;
+      actions = `<button class="btn btn-danger" onclick="cancelTask('${t.id}')">✕ Cancel</button>`;
     } else if (status === 'done') {
-      actions = `<button class="btn btn-success" onclick="downloadTask('${t.id}')">Download</button>`;
+      actions = `<button class="btn btn-success" onclick="downloadTask('${t.id}')">⬇ Download</button>`;
+    } else if (status === 'failed' || status === 'cancelled') {
+      actions = `<button class="btn btn-danger" style="background:#30363d;color:#8b949e" onclick="removeTask('${t.id}')">✕ Dismiss</button>`;
     }
-    const eta = status === 'processing' ? '<div class="progress-bar"><div class="progress-fill" style="width:60%"></div></div>' : '';
+
+    // 动画进度条（processing 时）
+    let progress = '';
+    if (status === 'processing') {
+      progress = `<div class="progress-bar"><div class="progress-fill anim"></div></div>`;
+    }
+
+    // 耗时
+    let elapsed = '';
+    if (t.started_at) {
+      const end = t.finished_at || now;
+      const secs = Math.round(end - t.started_at);
+      if (secs > 0) elapsed = ` | ${secs}s`;
+    }
+
     return `
       <div class="task-item">
         <div class="task-info">
-          <div class="task-prompt">${prompt || '(no prompt)'}</div>
+          <div class="task-prompt">${icon} ${t.params?.prompt || '(no prompt)'}</div>
           <div class="task-meta">
             <span class="badge ${badgeClass}">${status}</span>
-            #${shortId}
-            ${t.queue_position != null ? ` | queue pos: ${t.queue_position}` : ''}
+            ${res ? ` ${res}` : ''}
+            ${elapsed}
+            ${t.queue_position != null ? ` | pos #${t.queue_position}` : ''}
+            <span style="float:right;color:#484f58">${timeStr}</span>
           </div>
-          ${eta}
+          ${progress}
         </div>
         <div class="task-actions">${actions}</div>
       </div>`;
@@ -216,12 +258,35 @@ function renderTasks(activeTasks) {
 }
 
 async function refreshTasks() {
+  const now = Date.now() / 1000;
   const promises = [...taskIds].map(id =>
     fetch(`${API}/v1/video/status/${id}`).then(r => r.json()).catch(() => null)
   );
   const results = await Promise.all(promises);
   const active = results.filter(r => r).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
-  renderTasks(active);
+
+  // 清理过期任务
+  const finalStates = new Set(['done', 'failed', 'cancelled']);
+  for (const t of active) {
+    if (finalStates.has(t.status) && t.finished_at && (now - t.finished_at > TASK_TTL_MS / 1000)) {
+      taskIds.delete(t.id);
+    }
+  }
+
+  // 限制数量
+  if (taskIds.size > TASK_MAX) {
+    const toRemove = [...taskIds].slice(0, taskIds.size - TASK_MAX);
+    toRemove.forEach(id => taskIds.delete(id));
+  }
+
+  // 只渲染仍存在的
+  const visible = active.filter(t => taskIds.has(t.id));
+  renderTasks(visible);
+}
+
+function removeTask(id) {
+  taskIds.delete(id);
+  refreshTasks();
 }
 
 document.getElementById('gen-form').addEventListener('submit', async (e) => {
