@@ -1,96 +1,44 @@
 # Sulphur-2 Video Generation Server
 
-类似 llama-server，启动时加载 Sulphur-2 / LTX-2.3 GGUF 到显存，常驻等待请求。
+类似 llama-server，加载 Sulphur-2 GGUF 到显存，常驻生成视频。
 支持任务队列、状态查询、取消排队。
 
-## 关键概念
+## 磁盘 vs 显存
 
-`Abiray/Sulphur-2-base-GGUF` 只提供 GGUF 权重文件，例如：
+| | 需要多少 | 说明 |
+|---|---|---|
+| **硬盘** | ~11 GB GGUF + ~50 GB base pipeline = **~61 GB** | 一次性下载 |
+| **显存** | ~11 GB（Q3_K_M GGUF 常驻 GPU） | text_encoder/VAE 放 CPU，不占显存 |
 
-```text
-sulphur_dev-Q3_K_M.gguf
-sulphur_dev-Q4_K_M.gguf
-sulphur_dev-Q8_0.gguf
-```
+base pipeline 中 ~48.7 GB 是 text_encoder，只做 prompt 编码，放 CPU 运行不进显存。
 
-它不是完整 diffusers pipeline，缺少 VAE、text encoder、vocoder、scheduler、config 等组件。
+## 快速开始
 
-因此运行时需要两部分：
-
-| 部分 | 来源 | 作用 |
-|------|------|------|
-| GGUF 文件 | `Abiray/Sulphur-2-base-GGUF` | 量化 transformer 主体 |
-| base pipeline | `diffusers/LTX-2.3-Diffusers` | VAE / text encoder / vocoder / scheduler / config |
-
-联网环境可以自动下载 base pipeline；离线环境必须提前下载并复制到本机。
-
-## 安装依赖
+### 1. 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 联网部署
-
-只需要手动下载 GGUF 文件，base pipeline 会由程序自动从 HuggingFace 下载缓存。
-
-```bash
-python server.py \
-  --model diffusers/LTX-2.3-Diffusers \
-  --gguf ./sulphur_dev-Q3_K_M.gguf \
-  --concurrency 1 \
-  --queue-size 8
-```
-
-## 离线部署
-
-### 1. 在有网机器下载 base pipeline
-
-```bash
-huggingface-cli download diffusers/LTX-2.3-Diffusers \
-  --local-dir ./LTX-2.3-Diffusers \
-  --local-dir-use-symlinks False
-```
-
-如果没有 `huggingface-cli`：
-
-```bash
-pip install -U huggingface_hub
-```
-
 ### 2. 下载 GGUF 文件
 
-从这里下载一个 GGUF 文件：
+从以下地址选一个下载：
 
-```text
+```
 https://huggingface.co/Abiray/Sulphur-2-base-GGUF/tree/main
 ```
 
-例如：
+推荐 `sulphur_dev-Q3_K_M.gguf`（11.1 GB），12 GB 显存可跑。
 
-```text
-sulphur_dev-Q3_K_M.gguf
+### 3. 下载 base pipeline（联网）
+
+```bash
+python prepare_base.py
 ```
 
-### 3. 把两个东西复制到离线机器
+这会下载 `diffusers/LTX-2.3-Diffusers` 除 transformer 之外的所有组件到 `./LTX-2.3-Diffusers/`（约 50 GB）。
 
-目录示例：
-
-```text
-sulphur-server/
-├── server.py
-├── requirements.txt
-├── LTX-2.3-Diffusers/
-│   ├── model_index.json
-│   ├── transformer/
-│   ├── vae/
-│   ├── text_encoder/
-│   ├── vocoder/
-│   └── scheduler/
-└── sulphur_dev-Q3_K_M.gguf
-```
-
-### 4. 离线启动
+### 4. 启动服务
 
 ```bash
 python server.py \
@@ -100,7 +48,25 @@ python server.py \
   --queue-size 8
 ```
 
-这时不会访问 HuggingFace。
+## 离线部署
+
+在有网机器上：
+
+```bash
+# 下载 base pipeline（跳过 transformer）
+python prepare_base.py --output ./LTX-2.3-Diffusers
+
+# 下载 GGUF 文件
+# sulphur_dev-Q3_K_M.gguf
+```
+
+复制到离线机器，启动：
+
+```bash
+python server.py \
+  --model ./LTX-2.3-Diffusers \
+  --gguf ./sulphur_dev-Q3_K_M.gguf
+```
 
 ## API
 
@@ -112,7 +78,7 @@ curl -X POST http://localhost:8080/v1/video/generate \
   -d '{"prompt": "A cat walking on a sunny European street", "seed": 42}'
 ```
 
-返回：
+返回 `task_id`：
 
 ```json
 {"task_id": "a1b2c3d4e5f6", "status": "queued", "queue_position": 0}
@@ -132,7 +98,7 @@ curl http://localhost:8080/v1/video/status/a1b2c3d4e5f6
 curl -X POST http://localhost:8080/v1/video/cancel/a1b2c3d4e5f6
 ```
 
-只能取消 `queued` 状态的任务，已开始的无法取消。
+只能取消 `queued` 状态，已开始的无法取消。
 
 ### 下载结果
 
@@ -150,14 +116,14 @@ curl http://localhost:8080/health
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--model` | `diffusers/LTX-2.3-Diffusers` | base pipeline。联网可用 HF ID，离线必须用本地目录 |
-| `--gguf` | 无 | GGUF 文件路径，如 `sulphur_dev-Q3_K_M.gguf` |
+| `--model` | `diffusers/LTX-2.3-Diffusers` | base pipeline 路径（HF ID 或本地目录） |
+| `--gguf` | 无 | GGUF 文件路径 |
 | `--host` | `0.0.0.0` | 监听地址 |
 | `--port` | `8080` | 监听端口 |
 | `--concurrency` | `1` | 并发数，单 GPU 保持 1 |
-| `--queue-size` | `8` | 最大排队数，超出拒绝（503） |
+| `--queue-size` | `8` | 最大排队数 |
 
-## 生成参数
+## 生成参数（POST body）
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -171,20 +137,20 @@ curl http://localhost:8080/health
 | `seed` | int | -1 | 随机种子，-1 为随机 |
 | `fps` | int | 24 | 输出视频帧率，1-60 |
 
-## GGUF 推荐选择
+## GGUF 推荐
 
-| 文件 | 大小 | 需要显存 | 推荐场景 |
-|------|------|----------|----------|
-| `sulphur_dev-Q3_K_S.gguf` | 10.3 GB | ~12 GB | 最省显存 |
-| `sulphur_dev-Q3_K_M.gguf` | 11.1 GB | ~13 GB | 省显存 |
-| `sulphur_dev-Q4_K_M.gguf` | 14.3 GB | ~16 GB | 推荐甜点 |
-| `sulphur_dev-Q5_K_M.gguf` | 16.1 GB | ~18 GB | 质量优先 |
-| `sulphur_dev-Q8_0.gguf` | 22.8 GB | ~24 GB | 近无损 |
+| 文件 | 大小 | ~显存 | 场景 |
+|------|------|------|------|
+| `Q3_K_S` | 10.3 GB | 12 GB | 最省 |
+| `Q3_K_M` | 11.1 GB | 12 GB | 平衡 |
+| `Q4_K_M` | 14.3 GB | 16 GB | 推荐 |
+| `Q5_K_M` | 16.1 GB | 18 GB | 质量 |
+| `Q8_0` | 22.8 GB | 24 GB | 近无损 |
 
 ## 错误码
 
-| HTTP 状态 | 含义 |
-|-----------|------|
+| HTTP | 含义 |
+|------|------|
 | 400 | 参数不合法 |
 | 404 | 任务不存在 |
 | 409 | 取消已开始的任务 |

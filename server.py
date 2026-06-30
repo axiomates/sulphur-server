@@ -153,11 +153,13 @@ def _load_pipeline_gguf(base_model: str, gguf_path: str):
     """从 GGUF 文件加载量化 transformer + 基础模型的其他组件"""
     from diffusers import LTX2Pipeline, LTX2VideoTransformer3DModel, GGUFQuantizationConfig
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
     logger.info("Loading GGUF: %s", gguf_path)
     logger.info("Base model: %s", base_model)
     t0 = time.time()
 
-    # 1) 加载 GGUF 量化的 transformer（显存大头）
+    # 1) 加载 GGUF 量化的 transformer（放到指定 GPU）
     try:
         transformer = LTX2VideoTransformer3DModel.from_single_file(
             gguf_path,
@@ -166,28 +168,28 @@ def _load_pipeline_gguf(base_model: str, gguf_path: str):
             quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
             torch_dtype=torch.bfloat16,
         )
-        logger.info("GGUF transformer loaded (shape hint: %s)",
-                     next(transformer.parameters()).shape)
+        transformer.to(device)
+        logger.info("GGUF transformer loaded on %s", device)
     except Exception as e:
         logger.error("Failed to load GGUF transformer: %s", e)
         raise RuntimeError(f"GGUF load failed: {e}") from e
 
-    # 2) 加载完整 pipeline，替换 transformer 为 GGUF 版本
+    # 2) 加载 pipeline，其他组件 CPU offload 省显存
     try:
         pipe = LTX2Pipeline.from_pretrained(
             base_model,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
         )
+        pipe.enable_sequential_cpu_offload(device=device)
     except Exception as e:
         logger.error("Failed to load pipeline with GGUF transformer: %s", e)
         raise RuntimeError(f"Pipeline assembly failed: {e}") from e
 
-    _move_to_cuda(pipe)
-    _optimize_pipeline(pipe)
+    _optimize_pipeline(pipe, skip_compile=True)  # GGUF 量化模型不做 torch.compile
 
     elapsed = time.time() - t0
-    logger.info("GGUF model loaded in %.1fs on %s", elapsed, pipe.device)
+    logger.info("GGUF model loaded in %.1fs (transformer on %s, others CPU-offloaded)", elapsed, device)
     return pipe
 
 
@@ -203,11 +205,15 @@ def _move_to_cuda(pipe):
         raise
 
 
-def _optimize_pipeline(pipe):
+def _optimize_pipeline(pipe, skip_compile=False):
     """开启 VAE tiling 省显存、可选 torch.compile 加速"""
     if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
         pipe.vae.enable_tiling()
         logger.info("VAE tiling enabled")
+
+    if skip_compile:
+        logger.info("Skipping torch.compile (GGUF quantized model)")
+        return
 
     try:
         if hasattr(pipe, "transformer"):
