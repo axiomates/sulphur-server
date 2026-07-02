@@ -73,7 +73,7 @@ sulphur-server/
 ### 5. 启动
 
 ```bash
-python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_S.gguf
+python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_S.gguf --port 4323
 ```
 
 看到 `Server ready` 就成功了。服务只使用本地 `./LTX-2.3-Diffusers`，如果目录不存在会直接报错，不会在启动时下载大文件。
