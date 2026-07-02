@@ -28,13 +28,14 @@ logger = logging.getLogger("sulphur-server")
 pipe = None
 task_queue: "asyncio.Queue[Task]" = None
 tasks: dict[str, "Task"] = {}          # task_id -> Task
-tasks_lock = threading.Lock()
+tasks_lock = threading.RLock()
 generation_lock = threading.Lock()      # 单个 pipeline 不并发执行，避免线程安全和显存问题
 RESULTS_DIR = Path(__file__).parent / "outputs"
 
 
 class TaskStatus(str, Enum):
     QUEUED = "queued"
+    WAITING = "waiting"
     PROCESSING = "processing"
     DONE = "done"
     FAILED = "failed"
@@ -95,6 +96,7 @@ class HealthResponse(BaseModel):
     concurrency: int
     queue_size: int
     queue_max: int
+    waiting: int
     processing: int
     uptime_seconds: float
 
@@ -245,6 +247,12 @@ def run_generation(task: Task):
         tmp_path.unlink(missing_ok=True)
 
         with generation_lock:
+            with tasks_lock:
+                if task.status == TaskStatus.CANCELLED:
+                    return
+                task.status = TaskStatus.PROCESSING
+                task.started_at = time.time()
+
             # LTX2Pipeline 官方接口：返回 (video, audio)
             if pipe.__class__.__name__ == "LTX2Pipeline":
                 video, audio = pipe(
@@ -311,8 +319,7 @@ async def queue_worker(worker_id: int):
             if task.status == TaskStatus.CANCELLED:
                 task_queue.task_done()
                 continue
-            task.status = TaskStatus.PROCESSING
-            task.started_at = time.time()
+            task.status = TaskStatus.WAITING
 
         try:
             await loop.run_in_executor(None, run_generation, task)
@@ -400,6 +407,7 @@ async def index():
 @app.get("/health", response_model=HealthResponse)
 async def health():
     with tasks_lock:
+        waiting = sum(1 for t in tasks.values() if t.status == TaskStatus.WAITING)
         processing = sum(1 for t in tasks.values() if t.status == TaskStatus.PROCESSING)
     return HealthResponse(
         status="ok",
@@ -408,6 +416,7 @@ async def health():
         concurrency=app.state.concurrency,
         queue_size=task_queue.qsize() if task_queue else 0,
         queue_max=app.state.queue_max_size,
+        waiting=waiting,
         processing=processing,
         uptime_seconds=round(time.time() - app.state.start_time, 1),
     )
@@ -480,7 +489,7 @@ async def cancel_task(task_id: str):
             raise HTTPException(404, "Task not found")
         if task.status == TaskStatus.CANCELLED:
             return {"task_id": task_id, "status": "cancelled", "message": "Already cancelled"}
-        if task.status != TaskStatus.QUEUED:
+        if task.status not in (TaskStatus.QUEUED, TaskStatus.WAITING):
             raise HTTPException(409, f"Cannot cancel task in '{task.status.value}' status")
 
         task.status = TaskStatus.CANCELLED
@@ -500,7 +509,7 @@ async def get_result(task_id: str):
         error = task.error
         result_path = task.result_path
 
-    if status == TaskStatus.QUEUED or status == TaskStatus.PROCESSING:
+    if status in (TaskStatus.QUEUED, TaskStatus.WAITING, TaskStatus.PROCESSING):
         raise HTTPException(425, f"Task not ready yet (status: {status.value})")
     if status == TaskStatus.FAILED:
         raise HTTPException(500, error or "Generation failed")
@@ -520,16 +529,17 @@ async def get_result(task_id: str):
 # ---- 辅助函数 ----
 
 def task_response(task: Task) -> TaskStatusResponse:
-    return TaskStatusResponse(
-        id=task.id,
-        status=task.status.value,
-        queue_position=_queue_position(task.id),
-        created_at=task.created_at,
-        started_at=task.started_at,
-        finished_at=task.finished_at,
-        params=task.params,
-        error=task.error,
-    )
+    with tasks_lock:
+        return TaskStatusResponse(
+            id=task.id,
+            status=task.status.value,
+            queue_position=_queue_position(task.id),
+            created_at=task.created_at,
+            started_at=task.started_at,
+            finished_at=task.finished_at,
+            params=task.params,
+            error=task.error,
+        )
 
 
 def _queue_position(task_id: str) -> int | None:

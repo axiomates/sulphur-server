@@ -64,6 +64,7 @@
     display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
   }
   .badge-queued { background: #1b3a5c; color: #58a6ff; }
+  .badge-waiting { background: #2b2459; color: #a371f7; }
   .badge-processing { background: #2e2a0b; color: #d2991d; }
   .badge-done { background: #16361e; color: #3fb950; }
   .badge-failed { background: #3b1417; color: #f85149; }
@@ -172,7 +173,7 @@ async function checkHealth() {
     const text = document.getElementById('health-text');
     if (d.status === 'ok' && d.model_loaded) {
       dot.className = 'dot green';
-      text.textContent = `GPU Ready | Processing: ${d.processing} | Queue: ${d.queue_size}/${d.queue_max}`;
+      text.textContent = `GPU Ready | Processing: ${d.processing} | Waiting: ${d.waiting} | Queue: ${d.queue_size}/${d.queue_max}`;
     } else if (d.status === 'ok') {
       dot.className = 'dot yellow';
       text.textContent = 'Model loading...';
@@ -229,13 +230,14 @@ function renderTasks(activeTasks) {
 
     let icon = '';
     if (status === 'queued') icon = '⏳';
+    else if (status === 'waiting') icon = '🕓';
     else if (status === 'processing') icon = '🔄';
     else if (status === 'done') icon = '✅';
     else if (status === 'failed') icon = '❌';
     else if (status === 'cancelled') icon = '🚫';
 
     let actions = '';
-    if (status === 'queued') {
+    if (status === 'queued' || status === 'waiting') {
       actions = `<button class="btn btn-danger" onclick="cancelTask('${id}')">✕ Cancel</button>`;
     } else if (status === 'done') {
       actions = `<button class="btn btn-success" onclick="downloadTask('${id}')">⬇ Download</button>`;

@@ -139,7 +139,7 @@ outputs/<task_id>.mp4
 | GET | `/v1/video/result/{id}` | 下载 mp4 |
 | GET | `/health` | 服务状态 |
 
-状态：`queued` → `processing` → `done` / `failed` / `cancelled`
+状态：`queued` → `waiting` → `processing` → `done` / `failed` / `cancelled`
 
 ## 命令行参数
 
