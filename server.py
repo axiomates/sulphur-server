@@ -29,6 +29,7 @@ pipe = None
 task_queue: "asyncio.Queue[Task]" = None
 tasks: dict[str, "Task"] = {}          # task_id -> Task
 tasks_lock = threading.Lock()
+generation_lock = threading.Lock()      # 单个 pipeline 不并发执行，避免线程安全和显存问题
 RESULTS_DIR = Path(__file__).parent / "outputs"
 
 
@@ -243,23 +244,24 @@ def run_generation(task: Task):
 
         tmp_path.unlink(missing_ok=True)
 
-        # LTX2Pipeline 官方接口：返回 (video, audio)
-        if pipe.__class__.__name__ == "LTX2Pipeline":
-            video, audio = pipe(
-                **call_kwargs,
-                frame_rate=float(p["fps"]),
-                output_type="np",
-                return_dict=False,
-            )
-            generated_frame_count = frame_count(video)
-            write_video_file(tmp_path, video, p["fps"], audio)
-            del video, audio
-        else:
-            result = pipe(**call_kwargs, output_type="pil")
-            frames = result.frames[0]
-            generated_frame_count = frame_count(frames)
-            write_video_file(tmp_path, frames, p["fps"])
-            del result, frames
+        with generation_lock:
+            # LTX2Pipeline 官方接口：返回 (video, audio)
+            if pipe.__class__.__name__ == "LTX2Pipeline":
+                video, audio = pipe(
+                    **call_kwargs,
+                    frame_rate=float(p["fps"]),
+                    output_type="np",
+                    return_dict=False,
+                )
+                generated_frame_count = frame_count(video)
+                write_video_file(tmp_path, video, p["fps"], audio)
+                del video, audio
+            else:
+                result = pipe(**call_kwargs, output_type="pil")
+                frames = result.frames[0]
+                generated_frame_count = frame_count(frames)
+                write_video_file(tmp_path, frames, p["fps"])
+                del result, frames
 
         gc.collect()
         if torch.cuda.is_available():
@@ -312,13 +314,15 @@ async def queue_worker(worker_id: int):
             task.status = TaskStatus.PROCESSING
             task.started_at = time.time()
 
-        await loop.run_in_executor(None, run_generation, task)
-        task_queue.task_done()
+        try:
+            await loop.run_in_executor(None, run_generation, task)
+        finally:
+            task_queue.task_done()
 
 
 async def cleanup_expired_tasks():
     """定期清理已完成/失败/取消的过期任务；输出文件保留在 outputs/"""
-    TTL = 600  # 10 分钟后从内存中清除
+    TTL = 24 * 60 * 60  # 24 小时后从内存中清除
     while True:
         await asyncio.sleep(60)
         now = time.time()
@@ -448,24 +452,23 @@ async def submit_generation(req: GenerateRequest):
     )
 
 
+@app.get("/v1/video/tasks", response_model=list[TaskStatusResponse])
+async def list_tasks():
+    """列出当前仍保留在内存中的任务"""
+    with tasks_lock:
+        snapshot = list(tasks.values())
+    snapshot.sort(key=lambda t: t.created_at, reverse=True)
+    return [task_response(t) for t in snapshot]
+
+
 @app.get("/v1/video/status/{task_id}", response_model=TaskStatusResponse)
 async def task_status(task_id: str):
     """查询任务状态"""
-    queue_position = _queue_position(task_id)
     with tasks_lock:
         task = tasks.get(task_id)
         if task is None:
             raise HTTPException(404, "Task not found")
-        return TaskStatusResponse(
-            id=task.id,
-            status=task.status.value,
-            queue_position=queue_position,
-            created_at=task.created_at,
-            started_at=task.started_at,
-            finished_at=task.finished_at,
-            params=task.params,
-            error=task.error,
-        )
+    return task_response(task)
 
 
 @app.post("/v1/video/cancel/{task_id}")
@@ -491,26 +494,43 @@ async def get_result(task_id: str):
     """下载生成的视频"""
     with tasks_lock:
         task = tasks.get(task_id)
-    if task is None:
-        raise HTTPException(404, "Task not found")
-    if task.status == TaskStatus.QUEUED or task.status == TaskStatus.PROCESSING:
-        raise HTTPException(425, f"Task not ready yet (status: {task.status.value})")
-    if task.status == TaskStatus.FAILED:
-        raise HTTPException(500, task.error or "Generation failed")
-    if task.status == TaskStatus.CANCELLED:
+        if task is None:
+            raise HTTPException(404, "Task not found")
+        status = task.status
+        error = task.error
+        result_path = task.result_path
+
+    if status == TaskStatus.QUEUED or status == TaskStatus.PROCESSING:
+        raise HTTPException(425, f"Task not ready yet (status: {status.value})")
+    if status == TaskStatus.FAILED:
+        raise HTTPException(500, error or "Generation failed")
+    if status == TaskStatus.CANCELLED:
         raise HTTPException(410, "Task was cancelled")
 
-    if task.result_path is None or not task.result_path.exists():
+    if result_path is None or not result_path.exists():
         raise HTTPException(404, "Result file not found")
 
     return FileResponse(
-        task.result_path,
+        result_path,
         media_type="video/mp4",
         filename=f"{task_id}.mp4",
     )
 
 
 # ---- 辅助函数 ----
+
+def task_response(task: Task) -> TaskStatusResponse:
+    return TaskStatusResponse(
+        id=task.id,
+        status=task.status.value,
+        queue_position=_queue_position(task.id),
+        created_at=task.created_at,
+        started_at=task.started_at,
+        finished_at=task.finished_at,
+        params=task.params,
+        error=task.error,
+    )
+
 
 def _queue_position(task_id: str) -> int | None:
     """计算排队位置（粗糙：按创建时间排序 queued 任务）"""
@@ -556,16 +576,20 @@ def write_video_file(output_path: Path, frames, fps: int, audio=None):
             return
 
         writer = imageio.get_writer(str(output_path), format="mp4", fps=fps)
-        for frame in video:
-            writer.append_data(frame)
-        writer.close()
+        try:
+            for frame in video:
+                writer.append_data(frame)
+        finally:
+            writer.close()
         return
 
     # 旧 pipeline: PIL frames
     writer = imageio.get_writer(str(output_path), format="mp4", fps=fps)
-    for frame in frames:
-        writer.append_data(frame)
-    writer.close()
+    try:
+        for frame in frames:
+            writer.append_data(frame)
+    finally:
+        writer.close()
 
 
 # ---- 入口 ----

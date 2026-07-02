@@ -115,7 +115,7 @@ python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_S.gguf
 outputs/<task_id>.mp4
 ```
 
-任务状态记录会在内存里自动过期清理，但 `outputs/` 里的 mp4 文件会保留，方便之后手动整理或删除。
+任务状态记录会在内存里保留约 24 小时后自动清理，但 `outputs/` 里的 mp4 文件会保留，方便之后手动整理或删除。
 
 ## 资源
 
@@ -133,6 +133,7 @@ outputs/<task_id>.mp4
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/v1/video/generate` | 提交任务，返回 task_id |
+| GET | `/v1/video/tasks` | 列出当前仍在内存中的任务 |
 | GET | `/v1/video/status/{id}` | 查状态 |
 | POST | `/v1/video/cancel/{id}` | 取消排队 |
 | GET | `/v1/video/result/{id}` | 下载 mp4 |
@@ -148,7 +149,7 @@ outputs/<task_id>.mp4
 | `--gguf` | 无 | GGUF transformer 文件路径 |
 | `--host` | `0.0.0.0` | |
 | `--port` | `8080` | |
-| `--concurrency` | `1` | 单 GPU 别改 |
+| `--concurrency` | `1` | worker 数；共享 pipeline 的生成段会串行化，避免并发破坏模型/显存 |
 | `--queue-size` | `8` | 排满即拒 |
 
 ## 常见错误码

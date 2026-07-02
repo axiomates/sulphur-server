@@ -186,9 +186,20 @@ async function checkHealth() {
   }
 }
 
-const taskIds = new Set();
-const TASK_MAX = 50;
-const TASK_TTL_MS = 300_000; // 完成/失败/取消的任务 5 分钟后从列表清除
+const TASK_STORAGE_KEY = 'sulphur.taskIds';
+let storedTaskIds = [];
+try {
+  storedTaskIds = JSON.parse(localStorage.getItem(TASK_STORAGE_KEY) || '[]');
+} catch {
+  localStorage.removeItem(TASK_STORAGE_KEY);
+}
+const taskIds = new Set(storedTaskIds);
+const TASK_MAX = 200;
+const TASK_TTL_MS = 86_400_000; // 完成/失败/取消的任务 24 小时后从列表清除
+
+function saveTaskIds() {
+  localStorage.setItem(TASK_STORAGE_KEY, JSON.stringify([...taskIds]));
+}
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, ch => ({
@@ -271,6 +282,7 @@ async function refreshTasks() {
       const r = await fetch(`${API}/v1/video/status/${id}`);
       if (r.status === 404) {
         taskIds.delete(id);
+        saveTaskIds();
         return null;
       }
       return r.ok ? await r.json() : null;
@@ -281,11 +293,14 @@ async function refreshTasks() {
   const results = await Promise.all(promises);
   const active = results.filter(r => r).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
 
+  let changed = false;
+
   // 清理过期任务
   const finalStates = new Set(['done', 'failed', 'cancelled']);
   for (const t of active) {
     if (finalStates.has(t.status) && t.finished_at && (now - t.finished_at > TASK_TTL_MS / 1000)) {
       taskIds.delete(t.id);
+      changed = true;
     }
   }
 
@@ -293,7 +308,9 @@ async function refreshTasks() {
   if (taskIds.size > TASK_MAX) {
     const toRemove = [...taskIds].slice(0, taskIds.size - TASK_MAX);
     toRemove.forEach(id => taskIds.delete(id));
+    changed = true;
   }
+  if (changed) saveTaskIds();
 
   // 只渲染仍存在的
   const visible = active.filter(t => taskIds.has(t.id));
@@ -302,7 +319,21 @@ async function refreshTasks() {
 
 function removeTask(id) {
   taskIds.delete(id);
+  saveTaskIds();
   refreshTasks();
+}
+
+async function loadServerTasks() {
+  try {
+    const r = await fetch(`${API}/v1/video/tasks`);
+    if (!r.ok) return;
+    const serverTasks = await r.json();
+    for (const t of serverTasks) taskIds.add(t.id);
+    saveTaskIds();
+    renderTasks(serverTasks);
+  } catch {
+    // Ignore; normal polling will keep trying known local task ids.
+  }
 }
 
 document.getElementById('gen-form').addEventListener('submit', async (e) => {
@@ -333,6 +364,7 @@ document.getElementById('gen-form').addEventListener('submit', async (e) => {
     const d = await r.json();
     if (r.ok) {
       taskIds.add(d.task_id);
+      saveTaskIds();
       refreshTasks();
     } else {
       alert(`Error ${r.status}: ${d.detail || 'Unknown'}`);
@@ -356,7 +388,7 @@ function downloadTask(id) {
 
 // Init
 checkHealth();
-refreshTasks();
+loadServerTasks().then(refreshTasks);
 setInterval(checkHealth, 5000);
 setInterval(refreshTasks, 2000);
 </script>
