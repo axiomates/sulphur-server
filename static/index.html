@@ -75,15 +75,25 @@
   .progress-bar {
     height: 3px; background: #21262d; border-radius: 2px; margin-top: 8px; overflow: hidden;
   }
-  .progress-fill { height: 100%; background: #d2991d; border-radius: 2px; }
+  .progress-fill { height: 100%; background: #d2991d; border-radius: 2px; transition: width 0.3s ease; }
   .progress-fill.anim {
     width: 30% !important;
     animation: progress-slide 1.5s ease-in-out infinite;
+  }
+  /* 收尾阶段（decode/编码，无步数信号）：进度条停在 90% 附近做呼吸提示 */
+  .progress-fill.finalizing {
+    width: 90%;
+    animation: progress-pulse 1.2s ease-in-out infinite;
   }
   @keyframes progress-slide {
     0% { transform: translateX(-100%); }
     100% { transform: translateX(400%); }
   }
+  @keyframes progress-pulse {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 1; }
+  }
+  .task-step { color: #8b949e; font-size: 11px; margin-left: 4px; }
 </style>
 </head>
 <body>
@@ -245,10 +255,25 @@ function renderTasks(activeTasks) {
       actions = `<button class="btn btn-danger" style="background:#30363d;color:#8b949e" onclick="removeTask('${id}')">✕ Dismiss</button>`;
     }
 
-    // 动画进度条（processing 时）
+    // 进度条（processing 时）
     let progress = '';
+    let stepLabel = '';
     if (status === 'processing') {
-      progress = `<div class="progress-bar"><div class="progress-fill anim"></div></div>`;
+      const cur = t.current_step || 0;
+      const total = t.total_steps || 0;
+      if (total > 0 && cur >= total) {
+        // 扩散步数已完成，正在 decode / 编码视频（无细粒度信号）
+        progress = `<div class="progress-bar"><div class="progress-fill finalizing"></div></div>`;
+        stepLabel = `<span class="task-step">finalizing…</span>`;
+      } else if (total > 0) {
+        // 真实步数进度，映射到 0~90%，留 10% 给收尾
+        const pct = Math.round((cur / total) * 90);
+        progress = `<div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>`;
+        stepLabel = `<span class="task-step">step ${cur}/${total}</span>`;
+      } else {
+        // 尚未收到步数信号
+        progress = `<div class="progress-bar"><div class="progress-fill anim"></div></div>`;
+      }
     }
 
     // 耗时
@@ -268,6 +293,7 @@ function renderTasks(activeTasks) {
             ${res ? ` ${res}` : ''}
             ${escapeHtml(elapsed)}
             ${t.queue_position != null ? ` | pos #${escapeHtml(t.queue_position)}` : ''}
+            ${stepLabel}
             <span style="float:right;color:#484f58">${timeStr}</span>
           </div>
           ${progress}
@@ -279,27 +305,33 @@ function renderTasks(activeTasks) {
 
 async function refreshTasks() {
   const now = Date.now() / 1000;
-  const promises = [...taskIds].map(async id => {
-    try {
-      const r = await fetch(`${API}/v1/video/status/${id}`);
-      if (r.status === 404) {
-        taskIds.delete(id);
-        saveTaskIds();
-        return null;
-      }
-      return r.ok ? await r.json() : null;
-    } catch {
-      return null;
-    }
-  });
-  const results = await Promise.all(promises);
-  const active = results.filter(r => r).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
 
+  // 一次性拉取服务端内存里的所有任务，再用本地 taskIds 过滤，
+  // 避免对每个 id 单独轮询（N+1 → 1 个请求）。
+  let serverTasks;
+  try {
+    const r = await fetch(`${API}/v1/video/tasks`);
+    if (!r.ok) return;
+    serverTasks = await r.json();
+  } catch {
+    return;
+  }
+
+  const byId = new Map(serverTasks.map(t => [t.id, t]));
   let changed = false;
 
-  // 清理过期任务
+  // 本地记录的 id 若服务端已不存在（TTL 清理过），从本地移除
+  for (const id of [...taskIds]) {
+    if (!byId.has(id)) {
+      taskIds.delete(id);
+      changed = true;
+    }
+  }
+
+  // 清理已到期的终态任务
   const finalStates = new Set(['done', 'failed', 'cancelled']);
-  for (const t of active) {
+  for (const t of serverTasks) {
+    if (!taskIds.has(t.id)) continue;
     if (finalStates.has(t.status) && t.finished_at && (now - t.finished_at > TASK_TTL_MS / 1000)) {
       taskIds.delete(t.id);
       changed = true;
@@ -314,8 +346,9 @@ async function refreshTasks() {
   }
   if (changed) saveTaskIds();
 
-  // 只渲染仍存在的
-  const visible = active.filter(t => taskIds.has(t.id));
+  const visible = serverTasks
+    .filter(t => taskIds.has(t.id))
+    .sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
   renderTasks(visible);
 }
 
@@ -332,9 +365,8 @@ async function loadServerTasks() {
     const serverTasks = await r.json();
     for (const t of serverTasks) taskIds.add(t.id);
     saveTaskIds();
-    renderTasks(serverTasks);
   } catch {
-    // Ignore; normal polling will keep trying known local task ids.
+    // Ignore; refreshTasks will keep trying.
   }
 }
 

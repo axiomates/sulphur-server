@@ -107,6 +107,8 @@ python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_S.gguf
 
 如果 OOM，优先降到 `896x512`，保持 `num_frames=121`；这样仍接近 16:9 且约 5 秒。
 
+参数上限（防止一个请求打爆显存）：`width`/`height` ≤ 3840，`num_frames` ≤ 1281，`prompt` ≤ 2000 字符。超出返回 400。
+
 ## 输出文件
 
 生成完成后，服务会把 mp4 写入项目下的 `outputs/` 目录，例如：

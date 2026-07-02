@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -50,6 +51,8 @@ class Task:
         self.error: str | None = None
         self.result_path: Path | None = None
         self.frame_count: int = 0
+        self.current_step: int = 0
+        self.total_steps: int = 0
         self.created_at = time.time()
         self.started_at: float | None = None
         self.finished_at: float | None = None
@@ -58,14 +61,15 @@ class Task:
 # ---- 请求/响应模型 ----
 
 class GenerateRequest(BaseModel):
-    prompt: str = Field(..., description="文本提示词，推荐英文")
+    prompt: str = Field(..., min_length=1, max_length=2000, description="文本提示词，推荐英文")
     negative_prompt: str = Field(
         default="worst quality, inconsistent motion, blurry, jittery, distorted, low resolution",
+        max_length=2000,
         description="负面提示词"
     )
-    width: int = Field(default=1024, ge=64, description="视频宽度，需被32整除")
-    height: int = Field(default=576, ge=64, description="视频高度，需被32整除")
-    num_frames: int = Field(default=121, ge=9, description="帧数，需满足 8k+1，如 121, 161, 257")
+    width: int = Field(default=1024, ge=64, le=3840, description="视频宽度，需被32整除")
+    height: int = Field(default=576, ge=64, le=3840, description="视频高度，需被32整除")
+    num_frames: int = Field(default=121, ge=9, le=1281, description="帧数，需满足 8k+1，如 121, 161, 257")
     num_inference_steps: int = Field(default=20, ge=1, le=100, description="推理步数")
     guidance_scale: float = Field(default=3.0, ge=1.0, le=20.0, description="引导强度")
     seed: int = Field(default=-1, ge=-1, le=2**63 - 1, description="随机种子，-1 为随机")
@@ -82,6 +86,8 @@ class TaskStatusResponse(BaseModel):
     id: str
     status: str
     queue_position: int | None = None
+    current_step: int = 0
+    total_steps: int = 0
     created_at: float
     started_at: float | None = None
     finished_at: float | None = None
@@ -258,6 +264,12 @@ def run_generation(task: Task):
         if p["seed"] >= 0:
             generator = torch.Generator().manual_seed(p["seed"])
 
+        def on_step_end(pipeline, step, timestep, callback_kwargs):
+            # 扩散每步结束回调；step 从 0 开始，故 +1 表示已完成步数
+            with tasks_lock:
+                task.current_step = step + 1
+            return callback_kwargs
+
         call_kwargs = dict(
             prompt=p["prompt"],
             negative_prompt=p["negative_prompt"],
@@ -267,6 +279,7 @@ def run_generation(task: Task):
             num_inference_steps=p["num_inference_steps"],
             guidance_scale=p["guidance_scale"],
             generator=generator,
+            callback_on_step_end=on_step_end,
         )
 
         tmp_path.unlink(missing_ok=True)
@@ -277,6 +290,7 @@ def run_generation(task: Task):
                     return
                 task.status = TaskStatus.PROCESSING
                 task.started_at = time.time()
+                task.total_steps = p["num_inference_steps"]
 
             # LTX2Pipeline 官方接口：返回 (video, audio)
             if pipe.__class__.__name__ == "LTX2Pipeline":
@@ -410,6 +424,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Sulphur-2 Video Server", version="1.0", lifespan=lifespan)
+
+# 允许任意来源跨域调用 API（本服务无凭证鉴权，故 allow_credentials=False）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---- 静态文件 / UI ----
 
@@ -553,6 +576,8 @@ def task_response(task: Task) -> TaskStatusResponse:
             id=task.id,
             status=task.status.value,
             queue_position=_queue_position(task.id),
+            current_step=task.current_step,
+            total_steps=task.total_steps,
             created_at=task.created_at,
             started_at=task.started_at,
             finished_at=task.finished_at,
