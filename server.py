@@ -575,10 +575,10 @@ if __name__ == "__main__":
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Sulphur-2 Video Generation Server")
-    parser.add_argument("--model", default="diffusers/LTX-2.3-Diffusers",
-                        help="基础模型（提供 VAE / text encoder / scheduler），默认 LTX-2.3 diffusers 格式")
+    parser.add_argument("--model", default="./LTX-2.3-Diffusers",
+                        help="本地 Diffusers 组件目录（由 prepare_base.py 预下载），默认 ./LTX-2.3-Diffusers")
     parser.add_argument("--gguf", default=None,
-                        help="GGUF 量化模型文件路径，如 sulphur_dev-Q3_K_M.gguf")
+                        help="GGUF 量化模型文件路径，如 sulphur_dev-Q3_K_S.gguf")
     parser.add_argument("--host", default="0.0.0.0", help="监听地址")
     parser.add_argument("--port", type=int, default=8080, help="监听端口")
     parser.add_argument("--concurrency", type=int, default=1,
@@ -591,6 +591,12 @@ if __name__ == "__main__":
         parser.error("--concurrency must be >= 1")
     if args.queue_size < 1:
         parser.error("--queue-size must be >= 1")
+
+    model_path = Path(args.model)
+    if not model_path.exists():
+        parser.error(f"Model directory not found: {args.model}. Run prepare_base.py first.")
+    if not (model_path / "model_index.json").exists():
+        parser.error(f"model_index.json not found under: {args.model}")
 
     if args.gguf and not Path(args.gguf).exists():
         parser.error(f"GGUF file not found: {args.gguf}")

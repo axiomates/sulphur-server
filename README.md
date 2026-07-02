@@ -76,7 +76,7 @@ sulphur-server/
 python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_S.gguf
 ```
 
-看到 `Server ready` 就成功了。
+看到 `Server ready` 就成功了。服务只使用本地 `./LTX-2.3-Diffusers`，如果目录不存在会直接报错，不会在启动时下载大文件。
 
 ### 6. 打开 Web UI
 
@@ -144,7 +144,7 @@ outputs/<task_id>.mp4
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--model` | `diffusers/LTX-2.3-Diffusers` | Diffusers pipeline 组件来源；离线时指向 `./LTX-2.3-Diffusers` |
+| `--model` | `./LTX-2.3-Diffusers` | 本地 Diffusers 组件目录；必须先用 `prepare_base.py` 预下载好，服务启动时不会隐式下载大文件 |
 | `--gguf` | 无 | GGUF transformer 文件路径 |
 | `--host` | `0.0.0.0` | |
 | `--port` | `8080` | |
