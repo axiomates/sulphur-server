@@ -3,7 +3,7 @@
 
 Sulphur-2-base-GGUF 只提供量化后的 transformer；VAE、text encoder、scheduler、
 tokenizer、connectors、audio_vae、vocoder 等仍需来自 LTX-2.3 Diffusers pipeline。
-transformer（~38 GB）由 GGUF 文件替代，不需要下载。
+transformer（~38 GB）由 GGUF 文件替代，只需其 config.json 供 from_single_file 搭建结构。
 
 用法:
     # 联网下载到当前目录
@@ -21,6 +21,7 @@ from pathlib import Path
 
 COMPONENTS = [
     "model_index.json",
+    "transformer/config.json",
     "vae/*",
     "text_encoder/*",
     "audio_vae/*",

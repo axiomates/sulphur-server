@@ -146,9 +146,57 @@ def _load_pipeline_full(model_id: str):
     return pipe
 
 
+def _patch_ltx2_gguf_keymap():
+    """
+    补齐 diffusers `from_single_file` 对 LTX-2 transformer 缺失的两条 key 重命名。
+
+    Sulphur-2 / LTX-2 官方权重里的调制层叫 `prompt_adaln_single` /
+    `audio_prompt_adaln_single`，而 diffusers 模型内部是 `prompt_adaln` /
+    `audio_prompt_adaln`。diffusers 的转换脚本和 LoRA 加载都有这个映射，但 GGUF
+    走的 single_file 路径（convert_ltx2_transformer_to_diffusers）漏了它们，导致这
+    12 个权重成为 unexpected keys、模型对应层留在 meta device，随后 .to(device) 报
+    "Cannot copy out of meta tensor"。
+
+    这里包装原转换函数，转换后补做重命名再塞回加载表。若 diffusers 日后修复，
+    转换结果里不再有 `*_single` 前缀，本包装自动变为 no-op。
+    """
+    from diffusers.loaders import single_file_model as sfm
+
+    entry = sfm.SINGLE_FILE_LOADABLE_CLASSES.get("LTX2VideoTransformer3DModel")
+    if entry is None:
+        logger.warning("diffusers lacks LTX2 single-file support; skipping adaln key patch")
+        return
+
+    original_fn = entry["checkpoint_mapping_fn"]
+    if getattr(original_fn, "_sulphur_adaln_patched", False):
+        return
+
+    def patched_fn(checkpoint, **kwargs):
+        converted = original_fn(checkpoint, **kwargs)
+        renamed = 0
+        for key in list(converted.keys()):
+            if key.startswith("audio_prompt_adaln_single."):
+                new_key = "audio_prompt_adaln." + key[len("audio_prompt_adaln_single."):]
+            elif key.startswith("prompt_adaln_single."):
+                new_key = "prompt_adaln." + key[len("prompt_adaln_single."):]
+            else:
+                continue
+            converted[new_key] = converted.pop(key)
+            renamed += 1
+        if renamed:
+            logger.info("Remapped %d LTX-2 adaln_single key(s) for GGUF load", renamed)
+        return converted
+
+    patched_fn._sulphur_adaln_patched = True
+    entry["checkpoint_mapping_fn"] = patched_fn
+    logger.info("Patched diffusers LTX-2 single_file key map (prompt_adaln_single -> prompt_adaln)")
+
+
 def _load_pipeline_gguf(base_model: str, gguf_path: str):
     """从 GGUF 文件加载量化 transformer + 基础模型的其他组件"""
     from diffusers import LTX2Pipeline, LTX2VideoTransformer3DModel, GGUFQuantizationConfig
+
+    _patch_ltx2_gguf_keymap()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
