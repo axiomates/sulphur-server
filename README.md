@@ -38,20 +38,20 @@ pip install -r requirements.txt
 https://huggingface.co/Abiray/Sulphur-2-base-GGUF/tree/main
 ```
 
-下载 `sulphur_dev-Q3_K_M.gguf`（11.1 GB），放到项目目录下。
+12 GB 显存优先下载 `sulphur_dev-Q3_K_S.gguf`（10.3 GB），放到项目目录下。
 
-### 4. 下载 base pipeline（只需一次）
+### 4. 预下载 Diffusers 组件（只需一次）
 
 ```bash
 python prepare_base.py
 ```
 
-下载到 `./LTX-2.3-Diffusers/`，约 50 GB。等着就行。
+下载到 `./LTX-2.3-Diffusers/`，约 57 GB。这里不会下载 `transformer/`，因为 transformer 由 GGUF 文件替代；只下载 VAE、text encoder、scheduler、tokenizer、processor、connectors、audio_vae、vocoder 等 pipeline 组件。
 
 ### 5. 启动
 
 ```bash
-python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_M.gguf
+python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_S.gguf
 ```
 
 看到 `Server ready` 就成功了。
@@ -62,12 +62,21 @@ python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_M.gguf
 
 > 不要直接双击 `static/index.html`，那样走 `file://` 协议发不了请求。
 
+## 为什么需要两个模型来源
+
+`Abiray/Sulphur-2-base-GGUF` 只提供量化后的 transformer 单文件；Diffusers 目前也不能直接把整个 pipeline 从 GGUF 加载出来。因此这里是混合加载：
+
+- `sulphur_dev-Q3_K_S.gguf`：替代 `transformer/`。
+- `diffusers/LTX-2.3-Diffusers` 的非 transformer 组件：提供 VAE、text encoder、scheduler、tokenizer、processor、connectors、audio_vae、vocoder。
+
+`SulphurAI/Sulphur-2-base` 是 Sulphur 的原始权重页面；如果跑完整/ComfyUI 权重，要从那里下载。但本服务走 Diffusers + GGUF：GGUF 已经替代 Sulphur 的 transformer，剩下需要的是 LTX-2.3 pipeline 组件目录，所以预下载脚本使用 `diffusers/LTX-2.3-Diffusers`。
+
 ## 资源
 
 | | 需要 | 说明 |
 |---|---|---|
-| 硬盘 | ~61 GB | GGUF 11 GB + base pipeline 50 GB |
-| 显存 | ~12 GB | GGUF 常驻 GPU，其余组件放 CPU |
+| 硬盘 | ~68 GB | Q3_K_S GGUF 10.3 GB + 非 transformer Diffusers 组件约 57 GB |
+| 显存 | 12 GB 边缘可试 | Q3_K_S 常驻 GPU，其余组件 CPU offload；分辨率/帧数过高仍可能 OOM |
 
 ## 离线部署
 
@@ -89,8 +98,8 @@ python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_M.gguf
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--model` | `diffusers/LTX-2.3-Diffusers` | base pipeline |
-| `--gguf` | 无 | GGUF 文件路径 |
+| `--model` | `diffusers/LTX-2.3-Diffusers` | Diffusers pipeline 组件来源；离线时指向 `./LTX-2.3-Diffusers` |
+| `--gguf` | 无 | GGUF transformer 文件路径 |
 | `--host` | `0.0.0.0` | |
 | `--port` | `8080` | |
 | `--concurrency` | `1` | 单 GPU 别改 |

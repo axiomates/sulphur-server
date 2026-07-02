@@ -1,6 +1,8 @@
 """
-准备离线 base pipeline：仅下载 diffusers/LTX-2.3-Diffusers 中非 transformer 的组件。
+准备离线 Diffusers 组件：仅下载 diffusers/LTX-2.3-Diffusers 中非 transformer 的组件。
 
+Sulphur-2-base-GGUF 只提供量化后的 transformer；VAE、text encoder、scheduler、
+tokenizer、connectors、audio_vae、vocoder 等仍需来自 LTX-2.3 Diffusers pipeline。
 transformer（~38 GB）由 GGUF 文件替代，不需要下载。
 
 用法:
@@ -8,9 +10,9 @@ transformer（~38 GB）由 GGUF 文件替代，不需要下载。
     python prepare_base.py
 
     # 指定输出目录
-    python prepare_base.py --output ./my-ltx-base
+    python prepare_base.py --output ./LTX-2.3-Diffusers
 
-下载量约 50 GB（text_encoder 占 ~48.7 GB），只需执行一次。
+下载量约 57 GB（text_encoder ~48.7 GB，connectors ~6.3 GB），只需执行一次。
 """
 
 import argparse
@@ -42,7 +44,8 @@ def download_base(output_dir: str):
     print(f"Output directory: {out.resolve()}")
     print(f"Components: {', '.join(c.replace('/*', '/') for c in COMPONENTS if c != 'model_index.json')}")
     print()
-    print("Download size: ~50 GB (text_encoder is ~48.7 GB)")
+    print("Download size: ~57 GB (text_encoder ~48.7 GB, connectors ~6.3 GB)")
+    print("Skipping transformer/: replaced by your GGUF file")
     print()
 
     snapshot_download(
@@ -58,7 +61,7 @@ def download_base(output_dir: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Download LTX-2.3 base pipeline (no transformer)")
+    parser = argparse.ArgumentParser(description="Download LTX-2.3 Diffusers components for Sulphur GGUF (no transformer)")
     parser.add_argument("--output", default="./LTX-2.3-Diffusers",
                         help="输出目录，默认 ./LTX-2.3-Diffusers")
     args = parser.parse_args()
