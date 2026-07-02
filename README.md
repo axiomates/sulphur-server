@@ -149,7 +149,6 @@ outputs/<task_id>.mp4
 | `--gguf` | 无 | GGUF transformer 文件路径 |
 | `--host` | `0.0.0.0` | |
 | `--port` | `8080` | |
-| `--concurrency` | `1` | worker 数；共享 pipeline 的生成段会串行化，避免并发破坏模型/显存 |
 | `--queue-size` | `8` | 排满即拒 |
 
 ## 常见错误码

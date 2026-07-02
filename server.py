@@ -68,7 +68,7 @@ class GenerateRequest(BaseModel):
     num_frames: int = Field(default=121, ge=9, description="帧数，需满足 8k+1，如 121, 161, 257")
     num_inference_steps: int = Field(default=20, ge=1, le=100, description="推理步数")
     guidance_scale: float = Field(default=3.0, ge=1.0, le=20.0, description="引导强度")
-    seed: int = Field(default=-1, description="随机种子，-1 为随机")
+    seed: int = Field(default=-1, ge=-1, le=2**63 - 1, description="随机种子，-1 为随机")
     fps: int = Field(default=24, ge=1, le=60, description="输出帧率")
 
 
@@ -93,7 +93,6 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     device: str
-    concurrency: int
     queue_size: int
     queue_max: int
     waiting: int
@@ -151,7 +150,7 @@ def _load_pipeline_gguf(base_model: str, gguf_path: str):
     logger.info("Base model: %s", base_model)
     t0 = time.time()
 
-    # 1) 加载 GGUF 量化的 transformer（放到指定 GPU）
+    # 1) 加载 GGUF 量化的 transformer（常驻指定 GPU，不挂 offload hook）
     try:
         transformer = LTX2VideoTransformer3DModel.from_single_file(
             gguf_path,
@@ -166,14 +165,17 @@ def _load_pipeline_gguf(base_model: str, gguf_path: str):
         logger.error("Failed to load GGUF transformer: %s", e)
         raise RuntimeError(f"GGUF load failed: {e}") from e
 
-    # 2) 加载 pipeline，其他组件 CPU offload 省显存
+    # 2) 加载 pipeline。transformer 常驻 GPU，其余组件（尤其 ~48GB 的 text_encoder）
+    #    单独做 sequential CPU offload：留在 CPU，前向时按子模块换入 GPU。
+    #    不能用整 pipe 的 enable_sequential_cpu_offload —— 那会把常驻的 transformer
+    #    也挂上逐子模块 hook，导致 GGUF 量化权重每步反复搬运，又慢又不稳。
     try:
         pipe = LTX2Pipeline.from_pretrained(
             base_model,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
         )
-        pipe.enable_sequential_cpu_offload(device=device)
+        _offload_non_transformer(pipe, device)
     except Exception as e:
         logger.error("Failed to load pipeline with GGUF transformer: %s", e)
         raise RuntimeError(f"Pipeline assembly failed: {e}") from e
@@ -183,6 +185,29 @@ def _load_pipeline_gguf(base_model: str, gguf_path: str):
     elapsed = time.time() - t0
     logger.info("GGUF model loaded in %.1fs (transformer on %s, others CPU-offloaded)", elapsed, device)
     return pipe
+
+
+def _offload_non_transformer(pipe, device):
+    """
+    对 pipeline 中除 transformer 外的组件做 sequential CPU offload。
+
+    transformer（GGUF 量化）常驻 GPU，不挂 hook；其余 nn.Module 组件
+    （text_encoder / vae / audio_vae / vocoder 等）留在 CPU，前向时由
+    accelerate 按子模块换入 GPU、用完换出，从而在 12GB 显存上容纳 ~48GB
+    的 text_encoder。
+    """
+    from accelerate import cpu_offload
+
+    offloaded = []
+    for name in pipe.components:
+        if name == "transformer":
+            continue
+        component = getattr(pipe, name, None)
+        if isinstance(component, torch.nn.Module):
+            cpu_offload(component, execution_device=device)
+            offloaded.append(name)
+    logger.info("Sequential CPU offload on: %s (transformer stays on %s)",
+                ", ".join(offloaded), device)
 
 
 def _move_to_cuda(pipe):
@@ -364,28 +389,23 @@ async def lifespan(app: FastAPI):
         raise
 
     task_queue = asyncio.Queue(maxsize=app.state.queue_max_size)
-    workers = [
-        asyncio.create_task(queue_worker(i))
-        for i in range(app.state.concurrency)
-    ]
+    worker = asyncio.create_task(queue_worker(0))
     cleanup_task = asyncio.create_task(cleanup_expired_tasks())
-    app.state.workers = workers
 
     app.state.start_time = time.time()
-    logger.info(
-        "Server ready — concurrency=%d, queue max=%d",
-        app.state.concurrency, app.state.queue_max_size
-    )
+    logger.info("Server ready — queue max=%d", app.state.queue_max_size)
     yield
 
     # shutdown
     logger.info("Shutting down...")
     cleanup_task.cancel()
-    for w in workers:
-        w.cancel()
-    del pipe
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    worker.cancel()
+    # 等正在执行的生成结束（run_generation 在 executor 线程里，cancel 停不了它）
+    # 再删 pipe，避免生成中途模型被销毁。
+    with generation_lock:
+        del pipe
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     logger.info("Shutdown complete")
 
 
@@ -413,7 +433,6 @@ async def health():
         status="ok",
         model_loaded=pipe is not None,
         device=str(pipe.device) if pipe else "N/A",
-        concurrency=app.state.concurrency,
         queue_size=task_queue.qsize() if task_queue else 0,
         queue_max=app.state.queue_max_size,
         waiting=waiting,
@@ -552,7 +571,7 @@ def _queue_position(task_id: str) -> int | None:
         queued.sort(key=lambda t: t.created_at)
         for i, t in enumerate(queued):
             if t.id == task_id:
-                return i
+                return i + 1
     return None
 
 
@@ -585,7 +604,7 @@ def write_video_file(output_path: Path, frames, fps: int, audio=None):
             )
             return
 
-        writer = imageio.get_writer(str(output_path), format="mp4", fps=fps)
+        writer = imageio.get_writer(str(output_path), fps=fps)
         try:
             for frame in video:
                 writer.append_data(frame)
@@ -594,7 +613,7 @@ def write_video_file(output_path: Path, frames, fps: int, audio=None):
         return
 
     # 旧 pipeline: PIL frames
-    writer = imageio.get_writer(str(output_path), format="mp4", fps=fps)
+    writer = imageio.get_writer(str(output_path), fps=fps)
     try:
         for frame in frames:
             writer.append_data(frame)
@@ -615,14 +634,10 @@ if __name__ == "__main__":
                         help="GGUF 量化模型文件路径，如 sulphur_dev-Q3_K_S.gguf")
     parser.add_argument("--host", default="0.0.0.0", help="监听地址")
     parser.add_argument("--port", type=int, default=8080, help="监听端口")
-    parser.add_argument("--concurrency", type=int, default=1,
-                        help="并发 worker 数，单 GPU 保持 1，多 GPU 可调大（默认 1）")
     parser.add_argument("--queue-size", type=int, default=8,
                         help="最大排队数，超出拒绝新请求（默认 8）")
     args = parser.parse_args()
 
-    if args.concurrency < 1:
-        parser.error("--concurrency must be >= 1")
     if args.queue_size < 1:
         parser.error("--queue-size must be >= 1")
 
@@ -637,10 +652,9 @@ if __name__ == "__main__":
 
     app.state.model_id = args.model
     app.state.gguf_path = args.gguf
-    app.state.concurrency = args.concurrency
     app.state.queue_max_size = args.queue_size
 
     mode = f"GGUF: {args.gguf}" if args.gguf else f"full: {args.model}"
-    logger.info("Starting server on %s:%d | %s | concurrency=%d, queue=%d",
-                args.host, args.port, mode, args.concurrency, args.queue_size)
+    logger.info("Starting server on %s:%d | %s | queue=%d",
+                args.host, args.port, mode, args.queue_size)
     uvicorn.run(app, host=args.host, port=args.port)
