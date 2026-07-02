@@ -48,6 +48,28 @@ python prepare_base.py
 
 下载到 `./LTX-2.3-Diffusers/`，约 57 GB。这里不会下载 `transformer/`，因为 transformer 由 GGUF 文件替代；只下载 VAE、text encoder、scheduler、tokenizer、processor、connectors、audio_vae、vocoder 等 pipeline 组件。
 
+如果是手动离线下载，最终目录应类似：
+
+```text
+sulphur-server/
+├─ server.py
+├─ prepare_base.py
+├─ requirements.txt
+├─ sulphur_dev-Q3_K_S.gguf
+└─ LTX-2.3-Diffusers/
+   ├─ model_index.json
+   ├─ vae/
+   ├─ text_encoder/
+   ├─ audio_vae/
+   ├─ vocoder/
+   ├─ scheduler/
+   ├─ tokenizer/
+   ├─ processor/
+   └─ connectors/
+```
+
+不要放入 `LTX-2.3-Diffusers/transformer/`；它会被 `sulphur_dev-Q3_K_S.gguf` 替代。
+
 ### 5. 启动
 
 ```bash
@@ -84,6 +106,16 @@ python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_S.gguf
 | fps | 24 | 常用视频帧率 |
 
 如果 OOM，优先降到 `896x512`，保持 `num_frames=121`；这样仍接近 16:9 且约 5 秒。
+
+## 输出文件
+
+生成完成后，服务会把 mp4 写入项目下的 `outputs/` 目录，例如：
+
+```text
+outputs/<task_id>.mp4
+```
+
+任务状态记录会在内存里自动过期清理，但 `outputs/` 里的 mp4 文件会保留，方便之后手动整理或删除。
 
 ## 资源
 
