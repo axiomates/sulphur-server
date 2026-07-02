@@ -74,10 +74,10 @@ class GenerateRequest(BaseModel):
         default="worst quality, inconsistent motion, blurry, jittery, distorted, low resolution",
         description="负面提示词"
     )
-    width: int = Field(default=1216, ge=64, description="视频宽度，需被32整除")
-    height: int = Field(default=704, ge=64, description="视频高度，需被32整除")
+    width: int = Field(default=1024, ge=64, description="视频宽度，需被32整除")
+    height: int = Field(default=576, ge=64, description="视频高度，需被32整除")
     num_frames: int = Field(default=121, ge=9, description="帧数，需满足 8k+1，如 121, 161, 257")
-    num_inference_steps: int = Field(default=30, ge=1, le=100, description="推理步数")
+    num_inference_steps: int = Field(default=20, ge=1, le=100, description="推理步数")
     guidance_scale: float = Field(default=3.0, ge=1.0, le=20.0, description="引导强度")
     seed: int = Field(default=-1, description="随机种子，-1 为随机")
     fps: int = Field(default=24, ge=1, le=60, description="输出帧率")

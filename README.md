@@ -71,6 +71,20 @@ python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_S.gguf
 
 `SulphurAI/Sulphur-2-base` 是 Sulphur 的原始权重页面；如果跑完整/ComfyUI 权重，要从那里下载。但本服务走 Diffusers + GGUF：GGUF 已经替代 Sulphur 的 transformer，剩下需要的是 LTX-2.3 pipeline 组件目录，所以预下载脚本使用 `diffusers/LTX-2.3-Diffusers`。
 
+## 12 GB 显卡建议先试
+
+默认参数按 12 GB 显卡实验配置设置：
+
+| 参数 | 值 | 说明 |
+|------|----|------|
+| width | 1024 | 16:9，且能被 32 整除 |
+| height | 576 | 16:9，且能被 32 整除 |
+| num_frames | 121 | 24 fps 下约 5 秒 |
+| num_inference_steps | 20 | 先保证能跑；显存够再试 30 |
+| fps | 24 | 常用视频帧率 |
+
+如果 OOM，优先降到 `896x512`，保持 `num_frames=121`；这样仍接近 16:9 且约 5 秒。
+
 ## 资源
 
 | | 需要 | 说明 |
