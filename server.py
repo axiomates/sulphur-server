@@ -108,21 +108,28 @@ class HealthResponse(BaseModel):
 
 # ---- 模型加载 ----
 
-def load_pipeline(model_id: str, gguf_path: str | None = None):
+def load_pipeline(model_id: str, gguf_path: str | None = None,
+                  offload: bool = True, vae_tiling: bool = True, compile: bool = False):
     """
     加载模型到显存，常驻不释放。
 
     两种模式:
     1. gguf_path 为空 → 标准 diffusers 格式加载 (from_pretrained)
     2. gguf_path 指定 → 从 GGUF 文件加载量化 transformer，其他组件从 model_id 加载
+
+    三个显存/速度开关（默认值面向 12GB 显卡）:
+    - offload: 非 transformer 组件是否 CPU offload。大显存 + 中等量化可关闭以提速。
+    - vae_tiling: VAE 是否分块解码。大显存可关闭以提速。
+    - compile: 是否对 transformer 做 torch.compile（实验性，GGUF 可能失败并回退）。
     """
     if gguf_path:
-        return _load_pipeline_gguf(model_id, gguf_path)
+        return _load_pipeline_gguf(model_id, gguf_path, offload=offload,
+                                   vae_tiling=vae_tiling, compile=compile)
     else:
-        return _load_pipeline_full(model_id)
+        return _load_pipeline_full(model_id, vae_tiling=vae_tiling, compile=compile)
 
 
-def _load_pipeline_full(model_id: str):
+def _load_pipeline_full(model_id: str, vae_tiling: bool = True, compile: bool = False):
     """标准 diffusers 模型加载"""
     from diffusers import DiffusionPipeline
 
@@ -139,7 +146,7 @@ def _load_pipeline_full(model_id: str):
         raise RuntimeError(f"Model load failed: {e}") from e
 
     _move_to_cuda(pipe)
-    _optimize_pipeline(pipe)
+    _optimize_pipeline(pipe, vae_tiling=vae_tiling, skip_compile=not compile)
 
     elapsed = time.time() - t0
     logger.info("Model loaded in %.1fs on %s", elapsed, pipe.device)
@@ -192,7 +199,8 @@ def _patch_ltx2_gguf_keymap():
     logger.info("Patched diffusers LTX-2 single_file key map (prompt_adaln_single -> prompt_adaln)")
 
 
-def _load_pipeline_gguf(base_model: str, gguf_path: str):
+def _load_pipeline_gguf(base_model: str, gguf_path: str, offload: bool = True,
+                        vae_tiling: bool = True, compile: bool = False):
     """从 GGUF 文件加载量化 transformer + 基础模型的其他组件"""
     from diffusers import LTX2Pipeline, LTX2VideoTransformer3DModel, GGUFQuantizationConfig
 
@@ -219,25 +227,31 @@ def _load_pipeline_gguf(base_model: str, gguf_path: str):
         logger.error("Failed to load GGUF transformer: %s", e)
         raise RuntimeError(f"GGUF load failed: {e}") from e
 
-    # 2) 加载 pipeline。transformer 常驻 GPU，其余组件（尤其 ~48GB 的 text_encoder）
-    #    单独做 sequential CPU offload：留在 CPU，前向时按子模块换入 GPU。
-    #    不能用整 pipe 的 enable_sequential_cpu_offload —— 那会把常驻的 transformer
-    #    也挂上逐子模块 hook，导致 GGUF 量化权重每步反复搬运，又慢又不稳。
+    # 2) 加载 pipeline。transformer 常驻 GPU。
+    #    offload=True（小显存）：其余组件（尤其 ~24GB 的 text_encoder）单独做
+    #      sequential CPU offload，留在 CPU、前向时按子模块换入 GPU。不能用整 pipe 的
+    #      enable_sequential_cpu_offload —— 那会把常驻的 transformer 也挂上逐子模块
+    #      hook，导致 GGUF 量化权重每步反复搬运，又慢又不稳。
+    #    offload=False（大显存，如 A6000/DGX）：其余组件也搬上 GPU 常驻，零搬运最快。
     try:
         pipe = LTX2Pipeline.from_pretrained(
             base_model,
             transformer=transformer,
             torch_dtype=torch.bfloat16,
         )
-        _offload_non_transformer(pipe, device)
+        if offload:
+            _offload_non_transformer(pipe, device)
+        else:
+            _move_non_transformer_to_gpu(pipe, device)
     except Exception as e:
         logger.error("Failed to load pipeline with GGUF transformer: %s", e)
         raise RuntimeError(f"Pipeline assembly failed: {e}") from e
 
-    _optimize_pipeline(pipe, skip_compile=True)  # GGUF 量化模型不做 torch.compile
+    _optimize_pipeline(pipe, vae_tiling=vae_tiling, skip_compile=not compile)
 
     elapsed = time.time() - t0
-    logger.info("GGUF model loaded in %.1fs (transformer on %s, others CPU-offloaded)", elapsed, device)
+    strategy = "others CPU-offloaded" if offload else "all resident on GPU"
+    logger.info("GGUF model loaded in %.1fs (transformer on %s, %s)", elapsed, device, strategy)
     return pipe
 
 
@@ -264,6 +278,25 @@ def _offload_non_transformer(pipe, device):
                 ", ".join(offloaded), device)
 
 
+def _move_non_transformer_to_gpu(pipe, device):
+    """
+    把除 transformer 外的组件也搬上 GPU 常驻（关闭 offload 时用）。
+
+    适用于大显存（A6000 48GB / DGX 128GB）+ 中等量化：transformer 与
+    text_encoder 等全部常驻 GPU，前向零搬运，最快。若显存不足会在这里 OOM，
+    此时应改用 offload 模式或更高压缩的 GGUF。
+    """
+    resident = []
+    for name in pipe.components:
+        if name == "transformer":
+            continue
+        component = getattr(pipe, name, None)
+        if isinstance(component, torch.nn.Module):
+            component.to(device)
+            resident.append(name)
+    logger.info("Moved to %s (resident): %s", device, ", ".join(resident))
+
+
 def _move_to_cuda(pipe):
     """移动模型到 GPU，处理 OOM"""
     try:
@@ -276,11 +309,13 @@ def _move_to_cuda(pipe):
         raise
 
 
-def _optimize_pipeline(pipe, skip_compile=False):
+def _optimize_pipeline(pipe, vae_tiling=True, skip_compile=False):
     """开启 VAE tiling 省显存、可选 torch.compile 加速"""
-    if hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
+    if vae_tiling and hasattr(pipe, "vae") and hasattr(pipe.vae, "enable_tiling"):
         pipe.vae.enable_tiling()
         logger.info("VAE tiling enabled")
+    elif not vae_tiling:
+        logger.info("VAE tiling disabled (large VRAM mode)")
 
     if skip_compile:
         logger.info("Skipping torch.compile (GGUF quantized model)")
@@ -445,7 +480,12 @@ async def lifespan(app: FastAPI):
     RESULTS_DIR.mkdir(exist_ok=True)
 
     try:
-        pipe = load_pipeline(model_id, gguf_path)
+        pipe = load_pipeline(
+            model_id, gguf_path,
+            offload=app.state.offload,
+            vae_tiling=app.state.vae_tiling,
+            compile=app.state.compile,
+        )
     except Exception:
         logger.critical("Failed to load model — server cannot start")
         raise
@@ -709,6 +749,12 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8080, help="监听端口")
     parser.add_argument("--queue-size", type=int, default=8,
                         help="最大排队数，超出拒绝新请求（默认 8）")
+    parser.add_argument("--no-offload", action="store_true",
+                        help="关闭 CPU offload，把所有组件常驻 GPU（大显存如 A6000/DGX 用，更快；显存不足会 OOM）")
+    parser.add_argument("--no-vae-tiling", action="store_true",
+                        help="关闭 VAE 分块解码（大显存用，更快）")
+    parser.add_argument("--compile", action="store_true",
+                        help="对 transformer 做 torch.compile（实验性，GGUF 可能失败并自动回退）")
     args = parser.parse_args()
 
     if args.queue_size < 1:
@@ -726,8 +772,13 @@ if __name__ == "__main__":
     app.state.model_id = args.model
     app.state.gguf_path = args.gguf
     app.state.queue_max_size = args.queue_size
+    app.state.offload = not args.no_offload
+    app.state.vae_tiling = not args.no_vae_tiling
+    app.state.compile = args.compile
 
     mode = f"GGUF: {args.gguf}" if args.gguf else f"full: {args.model}"
-    logger.info("Starting server on %s:%d | %s | queue=%d",
-                args.host, args.port, mode, args.queue_size)
+    mem = "resident" if args.no_offload else "offload"
+    logger.info("Starting server on %s:%d | %s | queue=%d | mem=%s | vae_tiling=%s | compile=%s",
+                args.host, args.port, mode, args.queue_size, mem,
+                not args.no_vae_tiling, args.compile)
     uvicorn.run(app, host=args.host, port=args.port)

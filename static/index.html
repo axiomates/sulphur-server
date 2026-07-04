@@ -119,30 +119,68 @@
         <label>Negative Prompt</label>
         <input id="neg-prompt" placeholder="worst quality, blurry, jittery, distorted">
       </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Width</label>
-          <input id="width" type="number" value="1024" step="32">
-        </div>
-        <div class="form-group">
-          <label>Height</label>
-          <input id="height" type="number" value="576" step="32">
-        </div>
+      <div class="form-group">
+        <label>Resolution</label>
+        <select id="resolution">
+          <optgroup label="横向 16:9">
+            <option data-w="512" data-h="288">512 × 288 · 最低</option>
+            <option data-w="1024" data-h="576" selected>1024 × 576 · 推荐 (12GB)</option>
+            <option data-w="1536" data-h="864">1536 × 864 · 720p+</option>
+            <option data-w="1920" data-h="1088">1920 × 1088 · 1080p</option>
+            <option data-w="2560" data-h="1440">2560 × 1440 · 1440p</option>
+            <option data-w="3840" data-h="2176">3840 × 2176 · 4K · 最高</option>
+          </optgroup>
+          <optgroup label="竖向 9:16">
+            <option data-w="288" data-h="512">288 × 512 · 最低</option>
+            <option data-w="576" data-h="1024">576 × 1024 · 推荐</option>
+            <option data-w="864" data-h="1536">864 × 1536 · 720p+</option>
+            <option data-w="1088" data-h="1920">1088 × 1920 · 1080p</option>
+            <option data-w="1440" data-h="2560">1440 × 2560 · 1440p</option>
+            <option data-w="2176" data-h="3840">2176 × 3840 · 4K · 最高</option>
+          </optgroup>
+          <optgroup label="方形 1:1">
+            <option data-w="512" data-h="512">512 × 512</option>
+            <option data-w="768" data-h="768">768 × 768</option>
+            <option data-w="1024" data-h="1024">1024 × 1024</option>
+            <option data-w="1536" data-h="1536">1536 × 1536</option>
+            <option data-w="2048" data-h="2048">2048 × 2048 · 最高</option>
+          </optgroup>
+        </select>
+        <div style="font-size:11px;color:#8b949e;margin-top:4px">档位越高越清晰，但更耗显存、更慢；12GB 显卡建议 ≤ 1024 × 576。全部已对齐到 32 像素</div>
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label>Frames</label>
-          <input id="frames" type="number" value="121" step="8">
+          <label>Duration (时长)</label>
+          <select id="duration">
+            <option data-sec="2">2 秒</option>
+            <option data-sec="3">3 秒</option>
+            <option data-sec="5" selected>5 秒 · 推荐</option>
+            <option data-sec="8">8 秒</option>
+            <option data-sec="10">10 秒</option>
+          </select>
         </div>
         <div class="form-group">
-          <label>Steps</label>
-          <input id="steps" type="number" value="20" min="1" max="100">
+          <label>FPS (帧率)</label>
+          <select id="fps">
+            <option value="24" selected>24</option>
+            <option value="25">25</option>
+            <option value="48">48 · 高帧率</option>
+            <option value="50">50 · 高帧率</option>
+          </select>
         </div>
+      </div>
+      <div class="form-group" style="margin-top:-6px">
+        <div style="font-size:11px;color:#8b949e" id="frames-hint">≈ 121 帧</div>
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label>Guidance Scale</label>
-          <input id="guidance" type="number" value="3.0" min="1" max="20" step="0.5">
+          <label>Quality (质量档)</label>
+          <select id="steps">
+            <option value="15">草稿 · 15 步</option>
+            <option value="20" selected>标准 · 20 步</option>
+            <option value="30">精细 · 30 步</option>
+            <option value="40">最高 · 40 步</option>
+          </select>
         </div>
         <div class="form-group">
           <label>Seed (-1 for random)</label>
@@ -151,8 +189,8 @@
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label>FPS</label>
-          <input id="fps" type="number" value="24" min="1" max="60">
+          <label>Guidance Scale</label>
+          <input id="guidance" type="number" value="3.0" min="1" max="20" step="0.5">
         </div>
         <div class="form-group" style="display:flex;align-items:flex-end">
           <button type="submit" class="btn btn-primary" id="submit-btn">Generate</button>
@@ -376,16 +414,20 @@ document.getElementById('gen-form').addEventListener('submit', async (e) => {
   btn.disabled = true;
   btn.textContent = 'Submitting...';
 
+  const resOpt = document.getElementById('resolution').selectedOptions[0];
+  const fps = parseInt(document.getElementById('fps').value);
+  const durSec = parseFloat(document.getElementById('duration').selectedOptions[0].dataset.sec);
+
   const body = {
     prompt: document.getElementById('prompt').value.trim(),
     negative_prompt: document.getElementById('neg-prompt').value.trim() || undefined,
-    width: parseInt(document.getElementById('width').value),
-    height: parseInt(document.getElementById('height').value),
-    num_frames: parseInt(document.getElementById('frames').value),
+    width: parseInt(resOpt.dataset.w),
+    height: parseInt(resOpt.dataset.h),
+    num_frames: framesFor(durSec, fps),
     num_inference_steps: parseInt(document.getElementById('steps').value),
     guidance_scale: parseFloat(document.getElementById('guidance').value),
     seed: parseInt(document.getElementById('seed').value),
-    fps: parseInt(document.getElementById('fps').value),
+    fps: fps,
   };
   if (!body.prompt) { alert('Prompt required'); btn.disabled = false; btn.textContent = 'Generate'; return; }
 
@@ -420,7 +462,29 @@ function downloadTask(id) {
   window.open(`${API}/v1/video/result/${id}`, '_blank');
 }
 
+// 时长(秒) × fps 换算成合法帧数：LTX-2 要求 num_frames 满足 8k+1，
+// 且服务端限制 9 ~ 1281。四舍五入到最近的 8k+1 后再夹到区间内。
+function framesFor(durSec, fps) {
+  const raw = durSec * fps;
+  let frames = Math.round((raw - 1) / 8) * 8 + 1;
+  if (frames < 9) frames = 9;
+  if (frames > 1281) frames = 1281;
+  return frames;
+}
+
+function updateFramesHint() {
+  const fps = parseInt(document.getElementById('fps').value);
+  const durSec = parseFloat(document.getElementById('duration').selectedOptions[0].dataset.sec);
+  const frames = framesFor(durSec, fps);
+  const actualSec = (frames / fps).toFixed(1);
+  document.getElementById('frames-hint').textContent =
+    `≈ ${frames} 帧（实际约 ${actualSec}s @ ${fps}fps）`;
+}
+
 // Init
+document.getElementById('duration').addEventListener('change', updateFramesHint);
+document.getElementById('fps').addEventListener('change', updateFramesHint);
+updateFramesHint();
 checkHealth();
 loadServerTasks().then(refreshTasks);
 setInterval(checkHealth, 5000);
