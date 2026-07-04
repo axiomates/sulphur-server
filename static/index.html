@@ -478,39 +478,54 @@ function framesFor(durSec, fps) {
   return frames;
 }
 
-// 时长 × fps 不能超过 1281 帧。选定 fps 后，把会超限的时长档置灰禁用；
-// 若当前选中的时长已被禁用，自动回退到仍可用的最大时长档。
-// 返回本次是否发生了回退，以便 UI 提示用户实际被约束成了多少秒。
-function syncDurationOptions() {
-  const fps = parseInt(document.getElementById('fps').value);
+// 跷跷板联动：时长 × fps 必须 <= 1281 帧。用户最后改动的那个控件保留，
+// 另一个自动跌落到"能容纳"的最大标准档：
+//   改时长 → 若当前 fps 装不下，把 fps 降到能容纳该时长的最大档
+//   改 fps  → 若当前时长装不下，把时长缩到该 fps 能容纳的最大档
+// changed: 'duration' | 'fps'，标识本次是哪个控件被用户改动。
+function seesaw(changed) {
+  const fpsSel = document.getElementById('fps');
   const durSel = document.getElementById('duration');
-  let fallbackIdx = -1;
-  for (const opt of durSel.options) {
-    const sec = parseFloat(opt.dataset.sec);
-    const fits = sec * fps <= MAX_FRAMES;
-    opt.disabled = !fits;
-    if (fits) fallbackIdx = opt.index;  // 记录最后一个可用档（时长最大）
+  const fps = parseInt(fpsSel.value);
+  const durSec = parseFloat(durSel.selectedOptions[0].dataset.sec);
+
+  if (durSec * fps <= MAX_FRAMES) {
+    return { adjusted: false };  // 组合本就合法，无需让步
   }
-  if (durSel.selectedOptions[0].disabled && fallbackIdx >= 0) {
-    const requested = parseFloat(durSel.selectedOptions[0].dataset.sec);
-    durSel.selectedIndex = fallbackIdx;
+
+  if (changed === 'duration') {
+    // 保时长，让 fps 让步：在 fps 档里选能装下该时长的最大值
+    const fpsOpts = [...fpsSel.options].map(o => parseInt(o.value)).sort((a, b) => a - b);
+    const best = fpsOpts.filter(f => durSec * f <= MAX_FRAMES).pop();
+    const applied = best ?? fpsOpts[0];  // 理论上最低档总能装下最短时长
+    fpsSel.value = String(applied);
+    return { adjusted: true, kept: 'duration', field: 'fps', from: fps, to: applied };
+  } else {
+    // 保 fps，让时长让步：在时长档里选该 fps 能装下的最大值
+    let bestIdx = -1;
+    for (const opt of durSel.options) {
+      if (parseFloat(opt.dataset.sec) * fps <= MAX_FRAMES) bestIdx = opt.index;
+    }
+    const from = durSec;
+    durSel.selectedIndex = bestIdx >= 0 ? bestIdx : 0;
     const applied = parseFloat(durSel.selectedOptions[0].dataset.sec);
-    return { clamped: true, requested, applied, fps };
+    return { adjusted: true, kept: 'fps', field: 'duration', from, to: applied };
   }
-  return { clamped: false };
 }
 
-function updateFramesHint() {
-  const clamp = syncDurationOptions();
+function updateFramesHint(changed) {
+  const adj = changed ? seesaw(changed) : { adjusted: false };
   const fps = parseInt(document.getElementById('fps').value);
   const durSec = parseFloat(document.getElementById('duration').selectedOptions[0].dataset.sec);
   const frames = framesFor(durSec, fps);
   const actualSec = (frames / fps).toFixed(1);
   const hint = document.getElementById('frames-hint');
-  if (clamp.clamped) {
+  if (adj.adjusted) {
+    const label = adj.field === 'fps'
+      ? `fps ${adj.from}→${adj.to}`
+      : `时长 ${adj.from}s→${adj.to}s`;
     hint.innerHTML =
-      `<span style="color:#d2991d">⚠ ${clamp.requested}s @ ${clamp.fps}fps 超出上限 ${MAX_FRAMES} 帧，`
-      + `已自动改为 ${clamp.applied}s</span>`
+      `<span style="color:#d2991d">⚠ 超出上限 ${MAX_FRAMES} 帧，已自动把 ${label}</span>`
       + `<br>≈ ${frames} 帧（实际约 ${actualSec}s @ ${fps}fps）`;
   } else {
     hint.textContent = `≈ ${frames} 帧（实际约 ${actualSec}s @ ${fps}fps）`;
@@ -518,8 +533,8 @@ function updateFramesHint() {
 }
 
 // Init
-document.getElementById('duration').addEventListener('change', updateFramesHint);
-document.getElementById('fps').addEventListener('change', updateFramesHint);
+document.getElementById('duration').addEventListener('change', () => updateFramesHint('duration'));
+document.getElementById('fps').addEventListener('change', () => updateFramesHint('fps'));
 updateFramesHint();
 checkHealth();
 loadServerTasks().then(refreshTasks);
