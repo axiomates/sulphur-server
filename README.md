@@ -93,19 +93,30 @@ python server.py --model ./LTX-2.3-Diffusers --gguf ./sulphur_dev-Q3_K_S.gguf --
 
 `SulphurAI/Sulphur-2-base` 是 Sulphur 的原始权重页面；如果跑完整/ComfyUI 权重，要从那里下载。但本服务走 Diffusers + GGUF：GGUF 已经替代 Sulphur 的 transformer，剩下需要的是 LTX-2.3 pipeline 组件目录，所以预下载脚本使用 `diffusers/LTX-2.3-Diffusers`。
 
-## 12 GB 显卡建议先试
+## Web UI 参数（档位）
 
-默认参数按 12 GB 显卡实验配置设置：
+UI 不再让你手填裸参数，而是给出符合 LTX-2.3 约束的档位，避免填出非法值被服务端 400 拒绝：
 
-| 参数 | 值 | 说明 |
-|------|----|------|
-| width | 1024 | 16:9，且能被 32 整除 |
-| height | 576 | 16:9，且能被 32 整除 |
-| num_frames | 121 | 24 fps 下约 5 秒 |
-| num_inference_steps | 20 | 先保证能跑；显存够再试 30 |
-| fps | 24 | 常用视频帧率 |
+- **Resolution（分辨率）**：横向 16:9 / 竖向 9:16 / 方形 1:1 三组档位，从最低到 4K。所有档位的宽高都已对齐到 32 像素（LTX-2 硬性要求）。注意官网标称的 1080p=1920×1080、4K=3840×2160 里 1080 和 2160 不能被 32 整除，故这里用等效的 `1920×1088`、`3840×2176`。默认 `1024×576`。
+- **Duration + FPS（时长 + 帧率）**：选时长（2/3/5/8/10 秒）和帧率（24/25/48/50），前端自动换算成合法的 `8k+1` 帧数并夹到 9~1281，下方实时显示实际帧数与时长。
+- **Quality（质量档）**：草稿/标准/精细/最高，对应 15/20/30/40 推理步。
 
-如果 OOM，优先降到 `896x512`，保持 `num_frames=121`；这样仍接近 16:9 且约 5 秒。
+## 按显卡选启动方式
+
+服务默认按 **12 GB 显卡**配置：transformer（GGUF）常驻 GPU，其余组件 CPU offload，VAE 分块解码。大显存显卡可用 `--no-offload` / `--no-vae-tiling` 提速。
+
+关键账：text_encoder 是 gemma3 12B，bf16 加载约 **24 GB**，且只在开头编码 prompt 时跑一次；VAE 只在结尾 decode 一次。所以 offload 这两者几乎不影响每步速度——每步跑的是常驻的 transformer。是否 `--no-offload`（全常驻）取决于 `transformer + 24GB text_encoder + ~7GB VAE/其他 + 激活` 是否塞得进显存。
+
+| 显卡 | GGUF | 建议启动 | 说明 |
+|------|------|----------|------|
+| 12 GB | `Q3_K_S`（10.3 GB） | `python server.py --gguf ./sulphur_dev-Q3_K_S.gguf` | 默认全套省显存策略 |
+| A6000 48 GB | `Q8_0`（22.8 GB） | `python server.py --gguf ./sulphur_dev-Q8_0.gguf --no-vae-tiling` | 全常驻会 OOM（22.8+24+7+激活 > 48），保持 offload；峰值 ~30 GB |
+| A6000 48 GB | `Q4_K_M`（14.3 GB） | `python server.py --gguf ./sulphur_dev-Q4_K_M.gguf --no-offload --no-vae-tiling` | 14.3+24+7≈45 GB，可全常驻、零搬运最快 |
+| DGX 128 GB | `bf16`（42 GB） | `python server.py --gguf ./sulphur_dev_bf16.gguf --no-offload --no-vae-tiling` | 内存充裕，最高画质全常驻 |
+
+> bf16 GGUF 能否被 `GGUFQuantizationConfig` 直接加载尚未在真机验证；若加载报错，请把日志发上来。A6000 上跑 bf16（42 GB）时 `42+24>48`，text_encoder 塞不下，**不要**加 `--no-offload`。
+
+各档位在 24 fps、5 秒（121 帧）下的默认起点建议：`num_inference_steps=20`，显存够再上 30。如果 OOM，优先降分辨率档位或缩短时长。
 
 参数上限（防止一个请求打爆显存）：`width`/`height` ≤ 3840，`num_frames` ≤ 1281，`prompt` ≤ 2000 字符。超出返回 400。
 
@@ -123,8 +134,10 @@ outputs/<task_id>.mp4
 
 | | 需要 | 说明 |
 |---|---|---|
-| 硬盘 | ~68 GB | Q3_K_S GGUF 10.3 GB + 非 transformer Diffusers 组件约 57 GB |
-| 显存 | 12 GB 边缘可试 | Q3_K_S 常驻 GPU，其余组件 CPU offload；分辨率/帧数过高仍可能 OOM |
+| 硬盘 | ~68 GB 起 | GGUF（Q3_K_S 10.3 GB ~ bf16 42 GB）+ 非 transformer Diffusers 组件约 57 GB |
+| 显存 | 12 GB 边缘可试 | 默认 transformer 常驻 GPU、其余 CPU offload；大显存可 `--no-offload` 全常驻。分辨率/帧数过高仍可能 OOM |
+
+常见 GGUF 档位大小：Q3_K_S 10.3 GB · Q4_K_M 14.3 GB · Q6_K 17.8 GB · Q8_0 22.8 GB · bf16 42 GB。
 
 ## 离线部署
 
@@ -152,6 +165,9 @@ outputs/<task_id>.mp4
 | `--host` | `0.0.0.0` | |
 | `--port` | `8080` | |
 | `--queue-size` | `8` | 排满即拒 |
+| `--no-offload` | 关（默认 offload） | 关闭 CPU offload，把所有组件常驻 GPU。大显存（A6000/DGX）且用中等量化时更快；显存不足会 OOM |
+| `--no-vae-tiling` | 关（默认分块） | 关闭 VAE 分块解码。大显存下让最后一次 decode 走整块，更快 |
+| `--compile` | 关 | 对 transformer 做 `torch.compile`（实验性，GGUF 可能失败并自动回退） |
 
 ## 常见错误码
 
