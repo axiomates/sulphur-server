@@ -163,7 +163,11 @@ def _as_condition_pipeline(base):
 
     from diffusers import LTX2ConditionPipeline
 
-    cond = LTX2ConditionPipeline.from_pipe(base)
+    # torch_dtype 必须显式传 None：from_pipe 默认 torch.float32，会对整个 pipeline
+    # 执行 .to(dtype)，而 GGUF 量化的 transformer 不允许改 dtype（报 "Casting a
+    # quantized model to a new dtype is unsupported"）。组件已加载好、dtype 正确，
+    # 共享即可，无需再转。
+    cond = LTX2ConditionPipeline.from_pipe(base, torch_dtype=None)
     logger.info("Wrapped pipeline as LTX2ConditionPipeline (shared components, text/first/last-frame ready)")
     return cond
 
