@@ -158,15 +158,17 @@
             <option data-sec="5" selected>5 秒 · 推荐</option>
             <option data-sec="8">8 秒</option>
             <option data-sec="10">10 秒</option>
+            <option data-sec="15">15 秒</option>
+            <option data-sec="20">20 秒</option>
+            <option data-sec="30">30 秒</option>
           </select>
         </div>
         <div class="form-group">
           <label>FPS (帧率)</label>
           <select id="fps">
-            <option value="24" selected>24</option>
-            <option value="25">25</option>
-            <option value="48">48 · 高帧率</option>
-            <option value="50">50 · 高帧率</option>
+            <option value="24" selected>24 · 电影</option>
+            <option value="30">30 · 标准</option>
+            <option value="60">60 · 流畅</option>
           </select>
         </div>
       </div>
@@ -467,15 +469,34 @@ function downloadTask(id) {
 
 // 时长(秒) × fps 换算成合法帧数：LTX-2 要求 num_frames 满足 8k+1，
 // 且服务端限制 9 ~ 1281。四舍五入到最近的 8k+1 后再夹到区间内。
+const MAX_FRAMES = 1281;
 function framesFor(durSec, fps) {
   const raw = durSec * fps;
   let frames = Math.round((raw - 1) / 8) * 8 + 1;
   if (frames < 9) frames = 9;
-  if (frames > 1281) frames = 1281;
+  if (frames > MAX_FRAMES) frames = MAX_FRAMES;
   return frames;
 }
 
+// 时长 × fps 不能超过 1281 帧。选定 fps 后，把会超限的时长档置灰禁用；
+// 若当前选中的时长已被禁用，自动回退到仍可用的最大时长档。
+function syncDurationOptions() {
+  const fps = parseInt(document.getElementById('fps').value);
+  const durSel = document.getElementById('duration');
+  let fallbackIdx = -1;
+  for (const opt of durSel.options) {
+    const sec = parseFloat(opt.dataset.sec);
+    const fits = sec * fps <= MAX_FRAMES;
+    opt.disabled = !fits;
+    if (fits) fallbackIdx = opt.index;  // 记录最后一个可用档（时长最大）
+  }
+  if (durSel.selectedOptions[0].disabled && fallbackIdx >= 0) {
+    durSel.selectedIndex = fallbackIdx;
+  }
+}
+
 function updateFramesHint() {
+  syncDurationOptions();
   const fps = parseInt(document.getElementById('fps').value);
   const durSec = parseFloat(document.getElementById('duration').selectedOptions[0].dataset.sec);
   const frames = framesFor(durSec, fps);
