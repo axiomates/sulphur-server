@@ -41,6 +41,21 @@
   .form-group textarea { min-height: 60px; resize: vertical; }
   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
+  .img-slot { display: flex; flex-direction: column; gap: 6px; }
+  .img-slot-label { font-size: 11px; color: #8b949e; }
+  .img-drop {
+    border: 1px dashed #30363d; border-radius: 6px; padding: 16px 8px;
+    text-align: center; font-size: 12px; color: #8b949e; cursor: pointer;
+    background: #0d1117; transition: border-color 0.15s;
+  }
+  .img-drop:hover { border-color: #58a6ff; color: #58a6ff; }
+  .img-preview { width: 100%; border-radius: 6px; border: 1px solid #30363d; display: block; }
+  .img-clear {
+    background: #30363d; color: #8b949e; border: none; border-radius: 6px;
+    font-size: 11px; padding: 4px 8px; cursor: pointer; align-self: flex-start;
+  }
+  .img-clear:hover { background: #da3633; color: #fff; }
+
   .btn {
     width: 100%; padding: 10px 16px; border: none; border-radius: 6px;
     font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.15s;
@@ -119,6 +134,30 @@
       <div class="form-group">
         <label>Negative Prompt</label>
         <input id="neg-prompt" placeholder="worst quality, blurry, jittery, distorted">
+      </div>
+      <div class="form-group">
+        <label>条件图（可选）</label>
+        <div class="form-row">
+          <div class="img-slot">
+            <div class="img-slot-label">首帧 · 起点</div>
+            <input id="img-first" type="file" accept="image/*" hidden>
+            <div class="img-drop" id="img-first-drop" onclick="document.getElementById('img-first').click()">
+              <span>点击选择首帧</span>
+            </div>
+            <img class="img-preview" id="img-first-preview" hidden>
+            <button type="button" class="img-clear" id="img-first-clear" hidden onclick="clearImage('first')">✕ 清除</button>
+          </div>
+          <div class="img-slot">
+            <div class="img-slot-label">尾帧 · 终点</div>
+            <input id="img-last" type="file" accept="image/*" hidden>
+            <div class="img-drop" id="img-last-drop" onclick="document.getElementById('img-last').click()">
+              <span>点击选择尾帧</span>
+            </div>
+            <img class="img-preview" id="img-last-preview" hidden>
+            <button type="button" class="img-clear" id="img-last-clear" hidden onclick="clearImage('last')">✕ 清除</button>
+          </div>
+        </div>
+        <div style="font-size:11px;color:#8b949e;margin-top:4px">只给首帧=图生视频；首+尾=从起点过渡到终点。尾帧需先选首帧。</div>
       </div>
       <div class="form-group">
         <label>Resolution</label>
@@ -436,6 +475,14 @@ document.getElementById('gen-form').addEventListener('submit', async (e) => {
   };
   if (!body.prompt) { alert('Prompt required'); btn.disabled = false; btn.textContent = 'Generate'; return; }
 
+  // 条件图（base64 data URL）。尾帧必须搭配首帧。
+  if (imageData.last && !imageData.first) {
+    alert('选择尾帧前需先选择首帧');
+    btn.disabled = false; btn.textContent = 'Generate'; return;
+  }
+  if (imageData.first) body.image_first = imageData.first;
+  if (imageData.last) body.image_last = imageData.last;
+
   try {
     const r = await fetch(`${API}/v1/video/generate`, {
       method: 'POST',
@@ -465,6 +512,37 @@ async function cancelTask(id) {
 
 function downloadTask(id) {
   window.open(`${API}/v1/video/result/${id}`, '_blank');
+}
+
+// ---- 条件图（首/尾帧）上传与预览 ----
+const imageData = { first: null, last: null };  // 存 base64 data URL
+
+function bindImageSlot(slot) {
+  const input = document.getElementById(`img-${slot}`);
+  input.addEventListener('change', () => {
+    const file = input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      imageData[slot] = reader.result;  // data:image/...;base64,xxxx
+      const preview = document.getElementById(`img-${slot}-preview`);
+      preview.src = reader.result;
+      preview.hidden = false;
+      document.getElementById(`img-${slot}-drop`).hidden = true;
+      document.getElementById(`img-${slot}-clear`).hidden = false;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function clearImage(slot) {
+  imageData[slot] = null;
+  document.getElementById(`img-${slot}`).value = '';
+  const preview = document.getElementById(`img-${slot}-preview`);
+  preview.hidden = true;
+  preview.removeAttribute('src');
+  document.getElementById(`img-${slot}-drop`).hidden = false;
+  document.getElementById(`img-${slot}-clear`).hidden = true;
 }
 
 // 时长(秒) × fps 换算成合法帧数：LTX-2 要求 num_frames 满足 8k+1，
@@ -536,6 +614,8 @@ function updateFramesHint(changed) {
 document.getElementById('duration').addEventListener('change', () => updateFramesHint('duration'));
 document.getElementById('fps').addEventListener('change', () => updateFramesHint('fps'));
 updateFramesHint();
+bindImageSlot('first');
+bindImageSlot('last');
 checkHealth();
 loadServerTasks().then(refreshTasks);
 setInterval(checkHealth, 5000);

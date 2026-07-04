@@ -5,8 +5,10 @@ Sulphur-2 Video Generation Server
 """
 
 import gc
+import io
 import time
 import uuid
+import base64
 import asyncio
 import logging
 import threading
@@ -56,6 +58,9 @@ class Task:
         self.created_at = time.time()
         self.started_at: float | None = None
         self.finished_at: float | None = None
+        # 条件图（PIL.Image）。仅存内存、不进 params，避免轮询响应回传图片数据。
+        self.cond_first = None
+        self.cond_last = None
 
 
 # ---- 请求/响应模型 ----
@@ -74,6 +79,14 @@ class GenerateRequest(BaseModel):
     guidance_scale: float = Field(default=3.0, ge=1.0, le=20.0, description="引导强度")
     seed: int = Field(default=-1, ge=-1, le=2**63 - 1, description="随机种子，-1 为随机")
     fps: int = Field(default=24, ge=1, le=60, description="输出帧率")
+    image_first: str | None = Field(
+        default=None,
+        description="首帧条件图，base64（可含 data URL 前缀）。视频从此帧开始演变。",
+    )
+    image_last: str | None = Field(
+        default=None,
+        description="尾帧条件图，base64（可含 data URL 前缀）。须与 image_first 同时提供。",
+    )
 
 
 class GenerateResponse(BaseModel):
@@ -123,10 +136,36 @@ def load_pipeline(model_id: str, gguf_path: str | None = None,
     - compile: 是否对 transformer 做 torch.compile（实验性，GGUF 可能失败并回退）。
     """
     if gguf_path:
-        return _load_pipeline_gguf(model_id, gguf_path, offload=offload,
+        base = _load_pipeline_gguf(model_id, gguf_path, offload=offload,
                                    vae_tiling=vae_tiling, compile=compile)
     else:
-        return _load_pipeline_full(model_id, vae_tiling=vae_tiling, compile=compile)
+        base = _load_pipeline_full(model_id, vae_tiling=vae_tiling, compile=compile)
+
+    return _as_condition_pipeline(base)
+
+
+def _as_condition_pipeline(base):
+    """
+    把已加载的 pipeline 转成 LTX2ConditionPipeline，用于统一支持
+    纯文生视频 / 首帧 / 首尾帧三种模式（conditions=None 时等价纯文生视频）。
+
+    用 from_pipe 复用 base 的全部组件（transformer/vae/text_encoder…），
+    共享同一批 module 对象，因此 base 上已应用的 CPU offload hook 和 VAE
+    tiling 状态随组件对象一并保留，不重复占显存、无需重新设置。
+
+    非 LTX-2 的 pipeline（旧 UNet 等）直接原样返回。
+    """
+    if base.__class__.__name__ not in ("LTX2Pipeline", "LTX2ConditionPipeline"):
+        logger.info("Non-LTX2 pipeline (%s); skipping condition wrapper", base.__class__.__name__)
+        return base
+    if base.__class__.__name__ == "LTX2ConditionPipeline":
+        return base
+
+    from diffusers import LTX2ConditionPipeline
+
+    cond = LTX2ConditionPipeline.from_pipe(base)
+    logger.info("Wrapped pipeline as LTX2ConditionPipeline (shared components, text/first/last-frame ready)")
+    return cond
 
 
 def _load_pipeline_full(model_id: str, vae_tiling: bool = True, compile: bool = False):
@@ -334,6 +373,25 @@ def _optimize_pipeline(pipe, vae_tiling=True, skip_compile=False):
 
 # ---- 队列工作线程 ----
 
+def _build_conditions(task: Task):
+    """
+    根据任务的条件图构造 LTX2VideoCondition 列表：
+      首帧 → index=0，尾帧 → index=-1（均为 latent 帧索引，pipeline 内部换算）。
+    没有任何条件图时返回 None（等价纯文生视频）。
+    """
+    if task.cond_first is None and task.cond_last is None:
+        return None
+
+    from diffusers.pipelines.ltx2.pipeline_ltx2_condition import LTX2VideoCondition
+
+    conditions = []
+    if task.cond_first is not None:
+        conditions.append(LTX2VideoCondition(frames=task.cond_first, index=0, strength=1.0))
+    if task.cond_last is not None:
+        conditions.append(LTX2VideoCondition(frames=task.cond_last, index=-1, strength=1.0))
+    return conditions
+
+
 def run_generation(task: Task):
     """在独立线程中执行生成（同步 GPU 操作）"""
     logger.info("[%s] Started: '%s...'", task.id, task.params["prompt"][:60])
@@ -375,14 +433,15 @@ def run_generation(task: Task):
                 task.started_at = time.time()
                 task.total_steps = p["num_inference_steps"]
 
-            # LTX2Pipeline 官方接口：返回 (video, audio)
-            if pipe.__class__.__name__ == "LTX2Pipeline":
-                video, audio = pipe(
-                    **call_kwargs,
-                    frame_rate=float(p["fps"]),
-                    output_type="np",
-                    return_dict=False,
-                )
+            # LTX-2 官方接口（含 Condition 版）：返回 (video, audio)
+            if pipe.__class__.__name__ in ("LTX2Pipeline", "LTX2ConditionPipeline"):
+                extra = dict(frame_rate=float(p["fps"]), output_type="np", return_dict=False)
+                # 条件图（首帧 index=0 / 尾帧 index=-1，均为 latent 帧索引）。
+                # 仅 Condition 版支持 conditions；无图时不传，等价纯文生视频。
+                conditions = _build_conditions(task)
+                if conditions is not None:
+                    extra["conditions"] = conditions
+                video, audio = pipe(**call_kwargs, **extra)
                 generated_frame_count = frame_count(video)
                 write_video_file(tmp_path, video, p["fps"], audio)
                 del video, audio
@@ -421,6 +480,9 @@ def run_generation(task: Task):
             task.status = TaskStatus.FAILED
 
     finally:
+        # 释放条件图，避免完成/失败的任务在内存里长期持有 PIL 图像
+        task.cond_first = None
+        task.cond_last = None
         with tasks_lock:
             task.finished_at = time.time()
             elapsed = task.finished_at - task.started_at if task.started_at else 0
@@ -535,6 +597,24 @@ async def index():
 
 # ---- 端点 ----
 
+def decode_base64_image(data: str):
+    """把 base64（可含 data URL 前缀）解码为 RGB PIL.Image；失败抛 ValueError。"""
+    from PIL import Image, UnidentifiedImageError
+
+    if "," in data and data.strip().startswith("data:"):
+        data = data.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (ValueError, base64.binascii.Error) as e:
+        raise ValueError(f"无法解码 base64 图片: {e}") from e
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.load()
+    except (UnidentifiedImageError, OSError) as e:
+        raise ValueError(f"无法识别图片内容: {e}") from e
+    return img.convert("RGB")
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health():
     with tasks_lock:
@@ -564,12 +644,37 @@ async def submit_generation(req: GenerateRequest):
         errors.append("width 和 height 必须能被 32 整除")
     if (req.num_frames - 1) % 8 != 0:
         errors.append("num_frames 必须满足 8k+1，如 121, 161, 257")
+    if req.image_last and not req.image_first:
+        errors.append("提供尾帧时必须同时提供首帧")
+
+    # 条件图解码（仅在内存中，不写入 params）
+    cond_first = cond_last = None
+    if req.image_first:
+        try:
+            cond_first = decode_base64_image(req.image_first)
+        except ValueError as e:
+            errors.append(f"首帧图无效: {e}")
+    if req.image_last:
+        try:
+            cond_last = decode_base64_image(req.image_last)
+        except ValueError as e:
+            errors.append(f"尾帧图无效: {e}")
+
     if errors:
         raise HTTPException(400, "; ".join(errors))
 
     task_id = uuid.uuid4().hex[:12]
     params = req.model_dump()
+    # base64 图片数据体积大，不能留在 params（会被 /tasks、/status 每次轮询回传）。
+    # 仅保留轻量标记，真正的图存在 Task 属性上。
+    params.pop("image_first", None)
+    params.pop("image_last", None)
+    params["has_first_frame"] = cond_first is not None
+    params["has_last_frame"] = cond_last is not None
+
     task = Task(task_id, params)
+    task.cond_first = cond_first
+    task.cond_last = cond_last
 
     with tasks_lock:
         tasks[task_id] = task
