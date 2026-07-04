@@ -480,6 +480,7 @@ function framesFor(durSec, fps) {
 
 // 时长 × fps 不能超过 1281 帧。选定 fps 后，把会超限的时长档置灰禁用；
 // 若当前选中的时长已被禁用，自动回退到仍可用的最大时长档。
+// 返回本次是否发生了回退，以便 UI 提示用户实际被约束成了多少秒。
 function syncDurationOptions() {
   const fps = parseInt(document.getElementById('fps').value);
   const durSel = document.getElementById('duration');
@@ -491,18 +492,29 @@ function syncDurationOptions() {
     if (fits) fallbackIdx = opt.index;  // 记录最后一个可用档（时长最大）
   }
   if (durSel.selectedOptions[0].disabled && fallbackIdx >= 0) {
+    const requested = parseFloat(durSel.selectedOptions[0].dataset.sec);
     durSel.selectedIndex = fallbackIdx;
+    const applied = parseFloat(durSel.selectedOptions[0].dataset.sec);
+    return { clamped: true, requested, applied, fps };
   }
+  return { clamped: false };
 }
 
 function updateFramesHint() {
-  syncDurationOptions();
+  const clamp = syncDurationOptions();
   const fps = parseInt(document.getElementById('fps').value);
   const durSec = parseFloat(document.getElementById('duration').selectedOptions[0].dataset.sec);
   const frames = framesFor(durSec, fps);
   const actualSec = (frames / fps).toFixed(1);
-  document.getElementById('frames-hint').textContent =
-    `≈ ${frames} 帧（实际约 ${actualSec}s @ ${fps}fps）`;
+  const hint = document.getElementById('frames-hint');
+  if (clamp.clamped) {
+    hint.innerHTML =
+      `<span style="color:#d2991d">⚠ ${clamp.requested}s @ ${clamp.fps}fps 超出上限 ${MAX_FRAMES} 帧，`
+      + `已自动改为 ${clamp.applied}s</span>`
+      + `<br>≈ ${frames} 帧（实际约 ${actualSec}s @ ${fps}fps）`;
+  } else {
+    hint.textContent = `≈ ${frames} 帧（实际约 ${actualSec}s @ ${fps}fps）`;
+  }
 }
 
 // Init
